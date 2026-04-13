@@ -1,0 +1,12 @@
+# mcp.yaml
+
+servers:
+  langchain:
+    transport: http
+    url: https://docs.langchain.com/mcp
+  context7:
+    transport: http
+    url: https://mcp.context7.com/mcp
+    auth:
+      type: header
+      env: CONTEXT7_API_KEY
