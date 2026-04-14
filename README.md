@@ -124,6 +124,15 @@ Other providers and editors may work but are untested. Testers and PRs are welco
 - [ ] **Memory** — Long-term memory for cross-session context and learned patterns
 - [ ] **`SKILLS.md`** — Text-based skills could be supported in a later release for defining skills declaratively
 
+## Contributing
+
+Only pull requests developed by humans or with **metalgate-code** will be accepted.
+
+This policy ensures:
+- **Consistency** — Contributions follow the project's established patterns and conventions
+- **Quality control** — Changes align with the agent's principles
+- **Scope discipline** — PRs remain focused without feature creep or unnecessary refactoring
+
 ## License
 
 MIT
