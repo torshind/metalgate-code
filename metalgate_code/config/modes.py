@@ -29,10 +29,12 @@ INTERRUPT_CONFIGS = {
         "write_file": {"allowed_decisions": ["approve", "reject"]},
         "write_todos": {"allowed_decisions": ["approve", "reject"]},
         "execute": {"allowed_decisions": ["approve", "reject"]},
+        "create_tool_skill": {"allowed_decisions": ["approve", "reject"]},
     },
     "accept_edits": {
         "write_todos": {"allowed_decisions": ["approve", "reject"]},
         "execute": {"allowed_decisions": ["approve", "reject"]},
+        "create_tool_skill": {"allowed_decisions": ["approve", "reject"]},
     },
     "accept_everything": {},
 }
