@@ -31,9 +31,9 @@ Meta-skills for managing tools:
 
 ### Important Notes on Dynamic Tool Skills
 
-- Dynamic skill creation works only by asking the agent itself (e.g., "Create a tool skill that...").
-- Dynamic skill creation can potentially change the agent's virtual environment, as new dependencies may be installed.
-- Users can add skills manually by editing `skills.py`, but the agent must be restarted for the new skills to be recognized.
+- Dynamic skill creation works by asking the agent itself (e.g., "Create a tool skill that...").
+- Dynamic skill creation can potentially change the agent's virtual environment, as new dependencies may be installed (pending confirmation)
+- Users can add skills manually by editing `skills.py`, but the agent must be restarted for the new skills to be registered.
 
 ## Configuration Files
 
@@ -120,7 +120,7 @@ Other providers and editors may work but are untested. Testers and PRs are welco
 
 ## Roadmap
 
-- [ ] **Session reload** — Persist and restore conversation state across sessions (not yet working)
+- [x] **Session reload** — Persist and restore conversation state across sessions
 - [ ] **Memory** — Long-term memory for cross-session context and learned patterns
 - [ ] **`SKILLS.md`** — Text-based skills could be supported in a later release for defining skills declaratively
 
