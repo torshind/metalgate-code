@@ -10,7 +10,7 @@ from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, LocalShellBackend, StateBackend
 from deepagents_acp.server import AgentSessionContext
 from deepagents_cli.local_context import LocalContextMiddleware
-from langgraph.graph.state import Checkpointer, CompiledStateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from metalgate_code.config import get_interrupt_config
 from metalgate_code.middleware.dynamic_tools import DynamicToolsMiddleware
@@ -35,7 +35,6 @@ META_SKILLS = [
 
 def _build_agent(
     context: AgentSessionContext,
-    checkpointer: Checkpointer,
 ) -> CompiledStateGraph:
     """Agent factory based on the given root directory."""
     logger.info("Model: %s", context.model)
@@ -102,7 +101,6 @@ def _build_agent(
     return create_deep_agent(
         # Falls back to Deep Agent default model if not provided
         model=model,
-        checkpointer=checkpointer,
         backend=backend,
         interrupt_on=interrupt_config,
         middleware=[
@@ -115,8 +113,6 @@ def _build_agent(
     )
 
 
-def create_agent(
-    checkpointer: Checkpointer,
-) -> partial:
-    """Create a partial _build_agent function with the checkpointer pre-bound."""
-    return partial(_build_agent, checkpointer=checkpointer)
+def create_agent() -> partial:
+    """Create a partial _build_agent function with project-specific checkpointer."""
+    return partial(_build_agent)
