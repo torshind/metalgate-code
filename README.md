@@ -28,12 +28,13 @@ Meta-skills for managing tools:
 - `delete_tool_skill` — Remove a tool
 - `read_tool_skill` — Get details about a specific tool
 - `list_tool_skills` — List all available tools
+- `reload_tool_skills` — Reload skills from `skills.py` after manual edits
 
 ### Important Notes on Dynamic Tool Skills
 
 - Dynamic skill creation works by asking the agent itself (e.g., "Create a tool skill that...").
 - Dynamic skill creation can potentially change the agent's virtual environment, as new dependencies may be installed (pending confirmation)
-- Users can add skills manually by editing `skills.py`, but the agent must be restarted for the new skills to be registered.
+- Users can add skills manually by editing `skills.py`, then ask for `reload_tool_skills` to pick up changes without restarting the agent.
 
 ## Configuration Files
 
