@@ -21,6 +21,7 @@ from metalgate_code.skills import (
     delete_tool_skill,
     read_tool_skill,
     registry,
+    reload_tool_skills,
 )
 from metalgate_code.skills.registry_mcp import registry_mcp
 
@@ -30,6 +31,7 @@ META_SKILLS = [
     create_tool_skill,
     delete_tool_skill,
     read_tool_skill,
+    reload_tool_skills,
 ]
 
 

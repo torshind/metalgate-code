@@ -6,6 +6,7 @@ from metalgate_code.skills.meta_skills import (
     create_tool_skill,
     delete_tool_skill,
     read_tool_skill,
+    reload_tool_skills,
 )
 from metalgate_code.skills.registry import SkillRegistry, registry
 from metalgate_code.skills.registry_mcp import registry_mcp
@@ -19,6 +20,7 @@ __all__ = [
     "create_tool_skill",
     "delete_tool_skill",
     "read_tool_skill",
+    "reload_tool_skills",
     "SkillRegistry",
     "registry",
     "registry_mcp",

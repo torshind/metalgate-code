@@ -107,6 +107,16 @@ def create_tool_skill(
 
 
 @tool
+def reload_tool_skills() -> str:
+    """Reload all tool skills from skills.py.
+    Use this after the user has manually edited a tool skill to pick up changes without restarting."""
+    registry.reload()
+    return (
+        f"Reloaded {len(registry.names())} tool skills: {', '.join(registry.names())}"
+    )
+
+
+@tool
 def delete_tool_skill(name: str) -> str:
     """Remove a tool skill by name from skills.py and the live registry."""
     with open("skills.py") as f:
