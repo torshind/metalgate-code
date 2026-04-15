@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from acp import spawn_agent_process, text_block
+from acp.schema import ToolCallStart
 from conftest import AGENT_TIMEOUT, RecordingClient, logger
 
 
@@ -266,3 +267,66 @@ async def test_session_isolation_between_cwds(run_sh: Path) -> None:
 
         shutil.rmtree(temp_cwd1, ignore_errors=True)
         shutil.rmtree(temp_cwd2, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_session_replays_tool_calls(run_sh: Path, temp_cwd: Path) -> None:
+    """
+    Verify that when a session is resumed, tool calls in the conversation history
+    are replayed as ToolCallStart notifications.
+    """
+    client_play = RecordingClient()
+
+    # First interaction - ask agent to list files (should trigger a tool call)
+    session_id = await run_agent_with_session(
+        client_play,
+        run_sh,
+        "Use a tool skill to list files in the current directory.",
+        cwd=str(temp_cwd),
+    )
+
+    logger.info("First interaction output:\n%s", client_play.all_text)
+    assert client_play.updates, "First interaction produced no updates"
+
+    # Check that we got at least one tool call start in the first interaction
+    tool_calls_first = [u for u in client_play.updates if isinstance(u, ToolCallStart)]
+    assert len(tool_calls_first) > 0, "Expected tool calls in first interaction"
+
+    # Resume the same session
+    client_replay = RecordingClient()
+    resumed_session_id = await run_agent_with_session(
+        client_replay,
+        run_sh,
+        "Just say hello.",
+        cwd=str(temp_cwd),
+        session_id=session_id,
+    )
+
+    logger.info("Resumed session: %s", resumed_session_id)
+    logger.info("Second interaction output:\n%s", client_replay.all_text)
+
+    # Verify session ID is the same
+    assert resumed_session_id == session_id, "Session ID mismatch"
+
+    # Assertion: either we replayed tool calls, or the history replay worked
+    # The key thing is that the session resume completed and updates were received
+    assert client_replay.updates, "Session resumption produced no updates"
+
+    # Check that ToolCallStart notifications were replayed
+    tool_calls_replayed = [
+        u for u in client_replay.updates if isinstance(u, ToolCallStart)
+    ]
+
+    # If tool calls were in first interaction, they should ideally be replayed
+    # (this documents the expected behavior even if it fails)
+    if tool_calls_first:
+        logger.info(
+            "First interaction had %d tool calls, replay had %d",
+            len(tool_calls_first),
+            len(tool_calls_replayed),
+        )
+        # We assert at least some replay happened - exact count may vary based on
+        # tool vs message replay timing
+        assert len(tool_calls_replayed) > 0, (
+            "Tool calls from history should be replayed when session is resumed"
+        )
