@@ -2,6 +2,7 @@
 Project skills.
 """
 
+import os
 import subprocess
 from typing import Tuple
 
@@ -9,6 +10,7 @@ import httpx
 import yaml
 from langchain_core.tools import tool
 from markdownify import markdownify
+from tavily import TavilyClient
 
 
 #
@@ -33,6 +35,65 @@ def fetch_url(url: str) -> str:
     response = httpx.get(url, follow_redirects=True, timeout=30)
     response.raise_for_status()
     return markdownify(response.text)
+
+
+@tool
+def tavily_search(query: str, max_results: int = 5) -> dict:
+    """Search the web using Tavily API.
+    query = the search query string.
+    max_results = number of results to return (default 5, max 20).
+    Returns a dict with search results."""
+    api_key = os.environ.get("TAVILY_API_KEY")
+    if not api_key:
+        return {"error": "TAVILY_API_KEY environment variable not set"}
+
+    client = TavilyClient(api_key=api_key)
+    return client.search(query=query, max_results=min(max_results, 20))
+
+
+@tool
+def tavily_crawl(
+    url: str, max_depth: int = 3, limit: int = 50, instructions: str = ""
+) -> dict:
+    """Crawl a website starting from a base URL using Tavily API.
+    url = the starting URL to crawl from.
+    max_depth = maximum depth to crawl (default 3).
+    limit = maximum number of pages to crawl (default 50).
+    instructions = optional instructions to focus the crawl.
+    Returns a dict with crawl results."""
+    from tavily import TavilyClient
+
+    api_key = os.environ.get("TAVILY_API_KEY")
+    if not api_key:
+        return {"error": "TAVILY_API_KEY environment variable not set"}
+
+    client = TavilyClient(api_key=api_key)
+    return client.crawl(
+        url=url, max_depth=max_depth, limit=limit, instructions=instructions
+    )
+
+
+@tool
+def serper_search(query: str, num: int = 10) -> dict:
+    """Search Google using Serper API.
+    query = the search query string.
+    num = number of results to return (default 10, max 100).
+    Returns a dict with search results."""
+    api_key = os.environ.get("SERPER_API_KEY")
+    if not api_key:
+        return {"error": "SERPER_API_KEY environment variable not set"}
+
+    response = httpx.post(
+        "https://google.serper.dev/search",
+        headers={
+            "X-API-KEY": api_key,
+            "Content-Type": "application/json",
+        },
+        json={"q": query, "num": min(num, 100)},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
 
 
 #
