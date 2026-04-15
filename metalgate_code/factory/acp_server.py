@@ -6,7 +6,12 @@ import logging
 import os
 from typing import Any
 
-from acp.helpers import text_block, update_agent_message, update_user_message
+from acp.helpers import (
+    start_tool_call,
+    text_block,
+    update_agent_message,
+    update_user_message,
+)
 from acp.schema import (
     AgentCapabilities,
     AudioContentBlock,
@@ -30,6 +35,7 @@ from acp.schema import (
 )
 from deepagents_acp.server import AgentServerACP
 from deepagents_cli.sessions import _patch_aiosqlite
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
@@ -257,31 +263,56 @@ class MetalGateACP(AgentServerACP):
     async def _send_message_chunk(self, session_id: str, msg: Any) -> None:
         """Send a single message as a session update notification."""
         try:
-            msg_name = type(msg).__name__
-            content = getattr(msg, "content", str(msg))
-
-            # LangChain messages: HumanMessage, AIMessage, ToolMessage
-            is_human = "Human" in msg_name
-            is_ai = "AI" in msg_name
-
-            text = self._extract_text_from_content(content)
-            if not text:
-                return
-
-            if is_human:
-                update = update_user_message(text_block(text))
-                await self._conn.session_update(
-                    session_id=session_id,
-                    update=update,
-                )
-            elif is_ai:
-                update = update_agent_message(text_block(text))
-                await self._conn.session_update(
-                    session_id=session_id,
-                    update=update,
-                )
+            if isinstance(msg, HumanMessage):
+                await self._send_human_message(session_id, msg)
+            elif isinstance(msg, AIMessage):
+                await self._send_ai_message(session_id, msg)
+            elif isinstance(msg, ToolMessage):
+                await self._send_tool_message(session_id, msg)
         except Exception as e:
             logger.warning("Error sending message chunk: %s", e)
+
+    async def _send_human_message(self, session_id: str, msg: HumanMessage) -> None:
+        text = self._extract_text_from_content(msg.content)
+        if text:
+            await self._conn.session_update(
+                session_id=session_id,
+                update=update_user_message(text_block(text)),
+            )
+
+    async def _send_ai_message(self, session_id: str, msg: AIMessage) -> None:
+        text = self._extract_text_from_content(msg.content)
+
+        if text:
+            await self._conn.session_update(
+                session_id=session_id,
+                update=update_agent_message(text_block(text)),
+            )
+
+        for tc in msg.tool_calls:
+            call_id = tc.get("id") or ""
+            await self._conn.session_update(
+                session_id=session_id,
+                update=start_tool_call(
+                    title=f"Using {tc.get('name') or 'tool'}",
+                    tool_call_id=call_id,
+                    status="in_progress",
+                    kind=None,
+                    raw_input=tc.get("args") or None,
+                ),
+            )
+
+    async def _send_tool_message(self, session_id: str, msg: ToolMessage) -> None:
+        await self._conn.session_update(
+            session_id=session_id,
+            update=start_tool_call(
+                title=msg.name or "Tool result",
+                tool_call_id=msg.tool_call_id or "",
+                status="completed",
+                kind=None,
+                raw_output=self._extract_text_from_content(msg.content) or None,
+            ),
+        )
 
     async def prompt(
         self,
