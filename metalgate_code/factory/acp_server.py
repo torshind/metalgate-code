@@ -110,6 +110,8 @@ class MetalGateACP(AgentServerACP):
                             )
                         )
 
+        logger.info(f"List sessions: {len(sessions)} found in {target_cwd}")
+
         return ListSessionsResponse(sessions=sessions, next_cursor=None)
 
     async def _session_exists(self, session_id: str, cwd: str) -> bool:
@@ -241,8 +243,6 @@ class MetalGateACP(AgentServerACP):
 
                 # Replay each message as a session update
                 for msg in messages:
-                    obj_type = type(msg).__name__
-                    logger.debug("Message class=%s", obj_type)
                     await self._send_message_chunk(session_id, msg)
 
         except Exception as e:
@@ -263,6 +263,7 @@ class MetalGateACP(AgentServerACP):
     async def _send_message_chunk(self, session_id: str, msg: Any) -> None:
         """Send a single message as a session update notification."""
         try:
+            logger.debug(f"Sending message chunk type: {type(msg)}")
             if isinstance(msg, HumanMessage):
                 await self._send_human_message(session_id, msg)
             elif isinstance(msg, AIMessage):
@@ -351,20 +352,6 @@ class MetalGateACP(AgentServerACP):
         # from_conn_string is an async context manager
         async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
             self._agent.checkpointer = checkpointer
-
-            try:
-                state = await checkpointer.aget(
-                    {"configurable": {"thread_id": session_id}}
-                )
-                if state:
-                    msgs = state.get("channel_values", {}).get("messages", [])
-                    logger.info(
-                        "Resuming session %s with %d messages", session_id, len(msgs)
-                    )
-                else:
-                    logger.info("Starting new session: %s", session_id)
-            except Exception as e:
-                logger.warning("Could not read session state: %s", e)
 
             result = await super().prompt(prompt, session_id, **kwargs)
 
