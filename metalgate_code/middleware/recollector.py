@@ -130,12 +130,14 @@ class RecollectorMiddleware(AgentMiddleware):
         if historical_results:
             parts.append("### Related Conversations")
             for result in historical_results:
-                if id := result.get("id") not in self._injection_cache:
+                if (id := result.get("id")) not in self._injection_cache:
                     self._injection_cache.add(id)
                     memory_text = result.get("memory", "")
                     if memory_text:
                         parts.append(f"- {memory_text}")
             parts.append("")
+
+        logger.debug(f"Formatted memories: {parts}")
 
         return "\n".join(parts)
 

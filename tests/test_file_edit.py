@@ -3,10 +3,7 @@ Verifies that the ACP agent launched by run.sh is capable of editing a file.
 """
 
 import logging
-import os
-import tempfile
 import textwrap
-from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -15,24 +12,16 @@ from conftest import RecordingClient, run_agent
 logger = logging.getLogger("acp_test")
 
 
-# Fixtures
-@pytest.fixture
-def target_file() -> Generator[Path, None, None]:
-    """
-    A temporary file pre-populated with known content.
-    Deleted after the test regardless of outcome.
-    """
+def create_target_file(client: RecordingClient) -> Path:
+    """Create a test file with known content in the client's temp directory."""
     original = textwrap.dedent("""\
         Hello, ACP test!
         This line should be replaced by the agent.
         End of original content.
     """)
-    fd, raw_path = tempfile.mkstemp(suffix=".txt", prefix="acp_test_")
-    path = Path(raw_path)
-    os.close(fd)
+    path = client.temp_dir / "test_file.txt"
     path.write_text(original, encoding="utf-8")
-    yield path
-    path.unlink(missing_ok=True)
+    return path
 
 
 # Tests
@@ -42,7 +31,7 @@ async def test_agent_starts_and_responds(run_sh: Path) -> None:
     Smoke test: verify the agent process starts, handles the ACP handshake,
     and returns at least one session/update notification for an innocuous prompt.
     """
-    client = RecordingClient()
+    client = RecordingClient(prefix="acp_file_edit_test_")
     await run_agent(client, run_sh, "Hello! Are you ready?")
     logger.info("Agent output:\n%s", client.all_text)
 
@@ -53,15 +42,16 @@ async def test_agent_starts_and_responds(run_sh: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_edits_file(target_file: Path, run_sh: Path) -> None:
+async def test_agent_edits_file(run_sh: Path) -> None:
     """
     Full round-trip: spawn the agent, ask it to edit a file, verify the
     file changed on disk.
     """
+    client = RecordingClient(prefix="acp_file_edit_test_")
+    target_file = create_target_file(client)
     original_content = target_file.read_text(encoding="utf-8")
     expected_marker = "EDITED_BY_AGENT"
 
-    client = RecordingClient()
     await run_agent(
         client,
         run_sh,
@@ -96,18 +86,19 @@ async def test_agent_edits_file(target_file: Path, run_sh: Path) -> None:
         "No edit tool call observed — agent did not edit any file.\n"
         f"Agent output:\n{client.all_text}"
     )
-    assert str(target_file) in client.written_files, (
+    assert str(target_file.resolve()) in client.written_files, (
         f"Agent edited unexpected path(s): {client.written_files}"
     )
 
 
 @pytest.mark.asyncio
-async def test_agent_edit_preserves_encoding(target_file: Path, run_sh: Path) -> None:
+async def test_agent_edit_preserves_encoding(run_sh: Path) -> None:
     """
     Ensure the agent writes back valid UTF-8 (no corruption from encoding
     mismatches or binary injection).
     """
-    client = RecordingClient()
+    client = RecordingClient(prefix="acp_file_edit_test_")
+    target_file = create_target_file(client)
     marker = "UTF8_SAFE_EDIT_✓"
 
     await run_agent(
@@ -134,7 +125,7 @@ async def test_agent_call_skills(run_sh: Path) -> None:
     """
     Ensure the agent calls one of the predefined skills.
     """
-    client = RecordingClient()
+    client = RecordingClient(prefix="acp_file_edit_test_")
 
     await run_agent(
         client,

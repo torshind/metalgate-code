@@ -2,11 +2,18 @@
 SessionSummaryMiddleware - stores session summaries to Mem0.
 """
 
+import asyncio
 import logging
 from typing import Any
 
-from langchain.agents.middleware.types import AgentMiddleware, ModelRequest
+from langchain.agents.middleware.types import (
+    AgentMiddleware,
+    ContextT,
+    ModelRequest,
+    StateT,
+)
 from langchain_core.messages import BaseMessage
+from langgraph.runtime import Runtime
 
 from metalgate_code.memory import (
     HEURISTIC_AGENT_ID,
@@ -39,6 +46,8 @@ class CollectorMiddleware(AgentMiddleware):
             memory: AsyncMemory instance or None if memory is disabled.
         """
         self._memory = memory
+        self._save_task = None
+        self._saved_message_count = 0
 
     def _detect_outcome(self, request: ModelRequest) -> str:
         """
@@ -107,11 +116,14 @@ class CollectorMiddleware(AgentMiddleware):
             return
 
         messages = getattr(request, "messages", []) or []
+        new_messages = messages[self._saved_message_count :]
+        self._saved_message_count = len(messages)
 
-        if not messages:
+        if not new_messages:
             return
 
-        message_dicts = self._convert_messages(messages)
+        message_dicts = self._convert_messages(new_messages)
+        logger.info(f"Storing {len(message_dicts)} messages")
 
         # Store to heuristic scope with inference
         try:
@@ -141,6 +153,13 @@ class CollectorMiddleware(AgentMiddleware):
             # Log but don't fail the session
             logger.error(f"Failed to store historical memory: {e}")
 
+    async def aafter_agent(
+        self, state: StateT, runtime: Runtime[ContextT]
+    ) -> dict[str, Any] | None:
+        if self._save_task is not None:
+            await self._save_task
+            self._save_task = None
+
     def wrap_model_call(self, request: ModelRequest, handler) -> Any:
         """Sync override - raises since we require async."""
         raise NotImplementedError("SessionSummaryMiddleware requires async execution")
@@ -157,12 +176,12 @@ class CollectorMiddleware(AgentMiddleware):
             Result from handler.
         """
         logger.debug(f"Storing memories for request: {request}")
-
-        # Call handler first
-        result = await handler(request)
-
-        # Store memories after the call
+        # Wait for previous session's save to complete before proceeding
+        if self._save_task is not None:
+            await self._save_task
+            self._save_task = None
+        # Start current session's save in background
         if self._memory is not None and getattr(request, "messages", None):
-            await self._store_memories(request)
-
-        return result
+            self._save_task = asyncio.create_task(self._store_memories(request))
+        # Call handler
+        return await handler(request)

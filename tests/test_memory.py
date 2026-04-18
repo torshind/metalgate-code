@@ -8,8 +8,6 @@ These tests verify that:
 
 import asyncio
 import os
-import shutil
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -17,19 +15,10 @@ from acp import spawn_agent_process, text_block
 from conftest import AGENT_TIMEOUT, RecordingClient, logger
 
 
-@pytest.fixture
-def temp_cwd():
-    """Create a temporary directory for isolated memory storage."""
-    temp_dir = Path(tempfile.mkdtemp(prefix="memory_e2e_test_"))
-    yield temp_dir
-    shutil.rmtree(temp_dir, ignore_errors=True)
-
-
 async def run_agent_with_memory(
     client: RecordingClient,
     run_sh: Path,
     prompt: str,
-    cwd: str,
     memory_enabled: bool = True,
     session_id: str | None = None,
     timeout: int = AGENT_TIMEOUT,
@@ -60,7 +49,7 @@ async def run_agent_with_memory(
             # Resume existing session
             logger.info("Resuming session: %s", session_id)
             await conn.resume_session(
-                cwd=cwd,
+                cwd=str(client.temp_dir),
                 session_id=session_id,
                 mcp_servers=[],
             )
@@ -69,7 +58,7 @@ async def run_agent_with_memory(
         else:
             # Create new session
             session = await conn.new_session(
-                cwd=cwd,
+                cwd=str(client.temp_dir),
                 mcp_servers=[],
             )
             logger.info("New session: %s", session.session_id)
@@ -91,9 +80,7 @@ async def run_agent_with_memory(
 
 
 @pytest.mark.asyncio
-async def test_memory_extracts_and_retrieves_preferences(
-    run_sh: Path, temp_cwd: Path
-) -> None:
+async def test_memory_extracts_and_retrieves_preferences(run_sh: Path) -> None:
     """
     E2E test: Verify Mem0 extracts preferences in session 1
     and retrieves them in session 2.
@@ -103,30 +90,26 @@ async def test_memory_extracts_and_retrieves_preferences(
     Expected: Agent should remember "pytest" from Mem0
     """
     # Session 1: Share something memorable
-    client_share = RecordingClient()
+    client_share = RecordingClient(prefix="memory_e2e_test_")
     await run_agent_with_memory(
         client_share,
         run_sh,
         "You are a coding agent with an embedded automatic memory. "
         "My name is Alice and I want you to know that I always use pytest for testing.",
-        cwd=str(temp_cwd),
         memory_enabled=True,
     )
 
     logger.info("Session 1 output:\n%s", client_share.all_text)
     assert client_share.updates, "Session 1 produced no updates"
 
-    # Wait a moment for memory to be stored (async operations)
-    await asyncio.sleep(1)
-
     # Session 2: New session - ask what testing framework to use
-    client_ask = RecordingClient()
+    client_ask = RecordingClient(prefix="memory_e2e_test_")
+    client_ask.temp_dir = client_share.temp_dir  # Share temp dir with first client
     await run_agent_with_memory(
         client_ask,
         run_sh,
         "I'm starting a new Python project. Based on my preferences, "
         'what testing framework should I use? Just answer with the framework name or "I don\'t know".',
-        cwd=str(temp_cwd),
         memory_enabled=True,
     )
 
@@ -136,18 +119,11 @@ async def test_memory_extracts_and_retrieves_preferences(
     # The agent should remember "pytest" from session 1's memory
     response_text = client_ask.all_text.lower()
     # Look for pytest in the response
-    if "pytest" in response_text:
-        logger.info("SUCCESS: Agent remembered pytest from memory")
-    else:
-        # Memory might not be working, but that's okay for this test
-        # Just verify the sessions worked
-        logger.info(
-            "Note: Agent response did not contain 'pytest', response: %s", response_text
-        )
+    assert "pytest" in response_text, "Agent did not remember pytest from memory"
 
 
 # @pytest.mark.asyncio
-# async def test_memory_disabled_when_env_not_set(run_sh: Path, temp_cwd: Path) -> None:
+# async def test_memory_disabled_when_env_not_set(run_sh: Path) -> None:
 #     """
 #     Verify that when MEMORY env var is not set, memory middleware
 #     is not active (no errors, just doesn't store/retrieve).
@@ -160,7 +136,6 @@ async def test_memory_extracts_and_retrieves_preferences(
 #         "You are a coding agent with disabled embedded memory. "
 #         "You are going to forget what I am going to say. "
 #         "My name is Alice and I prefer unittest over pytest.",
-#         cwd=str(temp_cwd),
 #         memory_enabled=False,  # Memory disabled
 #     )
 
@@ -173,7 +148,6 @@ async def test_memory_extracts_and_retrieves_preferences(
 #         client_ask,
 #         run_sh,
 #         "What testing framework do I prefer?",
-#         cwd=str(temp_cwd),
 #         memory_enabled=False,
 #     )
 

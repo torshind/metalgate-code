@@ -3,7 +3,7 @@ Mem0 memory store initialization and utilities.
 """
 
 import atexit
-import os
+from pathlib import PurePath
 from typing import Any
 
 from mem0 import AsyncMemory
@@ -37,7 +37,7 @@ class MemoryStore:
         if self._initialized:
             return
         self._initialized = True
-        self.project_id = cwd
+        self.project_id = PurePath(cwd).name
         self.user_id = user_id
         self.store = self._create_memory_store(cwd)
         atexit.register(self._cleanup)
@@ -57,16 +57,13 @@ class MemoryStore:
         # Get provider-specific Mem0 configuration
         provider_config = get_mem0_config()
 
-        # Get embedding dimensions from env (matching the embedder model)
-        embedding_dims = int(os.environ.get("EMBEDDING_DIMS", 4096))
-
         # Build the full configuration
         config: dict[str, Any] = {
             "vector_store": {
-                "provider": "qdrant",
+                "provider": "chroma",
                 "config": {
-                    "path": str(data_dir / "qdrant"),
-                    "embedding_model_dims": embedding_dims,
+                    "path": str(data_dir / "chroma"),
+                    "collection_name": self.project_id + "_" + self.user_id,
                 },
             },
             "history_db_path": str(data_dir / "mem0_history.db"),

@@ -10,6 +10,7 @@ from acp.helpers import (
     start_tool_call,
     text_block,
     update_agent_message,
+    update_tool_call,
     update_user_message,
 )
 from acp.schema import (
@@ -306,11 +307,9 @@ class MetalGateACP(AgentServerACP):
     async def _send_tool_message(self, session_id: str, msg: ToolMessage) -> None:
         await self._conn.session_update(
             session_id=session_id,
-            update=start_tool_call(
-                title=msg.name or "Tool result",
+            update=update_tool_call(
                 tool_call_id=msg.tool_call_id or "",
                 status="completed",
-                kind=None,
                 raw_output=self._extract_text_from_content(msg.content) or None,
             ),
         )
