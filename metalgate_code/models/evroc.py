@@ -4,7 +4,7 @@ Evroc model utilities for fetching and creating models.
 
 import logging
 import os
-from typing import no_type_check
+from typing import Any, no_type_check
 
 import requests
 from langchain_openai import ChatOpenAI
@@ -15,6 +15,40 @@ logger = logging.getLogger("metalgate_code")
 # API configuration
 EVROC_BASE_URL = "https://models.think.cloud.evroc.com/v1"
 EVROC_MODELS_ENDPOINT = f"{EVROC_BASE_URL}/models"
+
+
+def get_mem0_config() -> dict[str, Any]:
+    """
+    Get Mem0 configuration for Evroc provider.
+
+    Evroc is OpenAI-compatible, so we use OpenAI-compatible config
+    for both LLM and embedder.
+
+    Returns:
+        Dictionary with llm and embedder configuration for Mem0.
+    """
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    embedding_model = os.environ.get("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-8B")
+
+    config: dict[str, Any] = {
+        "llm": {
+            "provider": "openai",
+            "config": {
+                "api_key": api_key,
+                "model": "moonshotai/Kimi-K2.5",
+                "openai_base_url": EVROC_BASE_URL,
+            },
+        },
+        "embedder": {
+            "provider": "openai",
+            "config": {
+                "api_key": api_key,
+                "model": embedding_model,
+                "openai_base_url": EVROC_BASE_URL,
+            },
+        },
+    }
+    return config
 
 
 def fetch_models() -> list[dict[str, str]]:

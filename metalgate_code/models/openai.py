@@ -4,7 +4,7 @@ OpenAI model utilities for fetching and creating models.
 
 import logging
 import os
-from typing import no_type_check
+from typing import Any, no_type_check
 
 import requests
 from langchain_openai import ChatOpenAI
@@ -15,6 +15,32 @@ logger = logging.getLogger("metalgate_code")
 # API configuration
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 OPENAI_MODELS_ENDPOINT = f"{OPENAI_BASE_URL}/models"
+
+# Default embedding model for Mem0
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+
+
+def get_mem0_config() -> dict[str, Any]:
+    """
+    Get Mem0 configuration for OpenAI provider.
+
+    Returns:
+        Dictionary with llm and embedder configuration for Mem0.
+    """
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    embedding_model = os.environ.get("EMBEDDINGS", DEFAULT_EMBEDDING_MODEL)
+
+    config: dict[str, Any] = {
+        "llm": {
+            "provider": "openai",
+            "config": {"api_key": api_key, "model": "gpt-4.1-nano"},
+        },
+        "embedder": {
+            "provider": "openai",
+            "config": {"api_key": api_key, "model": embedding_model},
+        },
+    }
+    return config
 
 
 def fetch_models() -> list[dict[str, str]]:
