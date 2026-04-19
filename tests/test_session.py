@@ -4,8 +4,6 @@ Verifies that the ACP agent launched by run.sh is capable of saving and resuming
 
 import asyncio
 import os
-import tempfile
-from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -14,25 +12,10 @@ from acp.schema import ToolCallStart
 from conftest import AGENT_TIMEOUT, RecordingClient, logger
 
 
-@pytest.fixture
-def temp_cwd() -> Generator[Path, None, None]:
-    """
-    Create a temporary directory to use as the working directory for sessions.
-    This ensures each test has isolated session storage.
-    """
-    temp_dir = Path(tempfile.mkdtemp(prefix="acp_session_test_"))
-    yield temp_dir
-    # Cleanup: remove the temp directory and all contents
-    import shutil
-
-    shutil.rmtree(temp_dir, ignore_errors=True)
-
-
 async def run_agent_with_session(
     client: RecordingClient,
     run_sh: Path,
     prompt: str,
-    cwd: str,
     session_id: str | None = None,
     timeout: int = AGENT_TIMEOUT,
 ) -> str:
@@ -53,16 +36,28 @@ async def run_agent_with_session(
             # Resume existing session
             logger.info("Resuming session: %s", session_id)
             await conn.resume_session(
-                cwd=cwd,
+                cwd=str(client.temp_dir),
                 session_id=session_id,
                 mcp_servers=[],
             )
             logger.info("Resumed session: %s", session_id)
+            await conn.set_config_option(
+                config_id="model",
+                session_id=session_id,
+                value="evroc:moonshotai/Kimi-K2.5",
+            )
+            await asyncio.wait_for(
+                conn.prompt(
+                    session_id=session_id,
+                    prompt=[text_block(prompt)],
+                ),
+                timeout=timeout,
+            )
             return session_id
         else:
             # Create new session
             session = await conn.new_session(
-                cwd=cwd,
+                cwd=str(client.temp_dir),
                 mcp_servers=[],
             )
             logger.info("New session: %s", session.session_id)
@@ -84,19 +79,18 @@ async def run_agent_with_session(
 
 
 @pytest.mark.asyncio
-async def test_session_saved_to_checkpointer(run_sh: Path, temp_cwd: Path) -> None:
+async def test_session_saved_to_checkpointer(run_sh: Path) -> None:
     """
     Verify that when a session is created and used, the conversation is saved
     to the checkpointer database.
     """
-    client = RecordingClient()
+    client = RecordingClient(prefix="acp_session_test_")
 
     # Create a new session and send a message
     session_id = await run_agent_with_session(
         client,
         run_sh,
         "Hello! This is a test message for session persistence.",
-        cwd=str(temp_cwd),
     )
 
     logger.info("Session ID: %s", session_id)
@@ -113,13 +107,11 @@ async def test_session_saved_to_checkpointer(run_sh: Path, temp_cwd: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_list_sessions_returns_created_session(
-    run_sh: Path, temp_cwd: Path
-) -> None:
+async def test_list_sessions_returns_created_session(run_sh: Path) -> None:
     """
     Verify that after creating a session, it appears in the list of sessions.
     """
-    client = RecordingClient()
+    client = RecordingClient(prefix="acp_session_test_")
 
     # Create a session with a distinctive message
     test_marker = f"SESSION_LIST_TEST_{os.urandom(4).hex()}"
@@ -127,7 +119,6 @@ async def test_list_sessions_returns_created_session(
         client,
         run_sh,
         f"Hello! This is a test with marker: {test_marker}",
-        cwd=str(temp_cwd),
     )
 
     logger.info("Session ID: %s", session_id)
@@ -143,7 +134,7 @@ async def test_list_sessions_returns_created_session(
         str(run_sh),
     ) as (conn, _proc):
         await conn.initialize(protocol_version=1)
-        list_response = await conn.list_sessions(cwd=str(temp_cwd))
+        list_response = await conn.list_sessions(cwd=str(client.temp_dir))
         logger.info("Listed %d sessions", len(list_response.sessions))
 
         # Verify our session is in the list
@@ -155,21 +146,18 @@ async def test_list_sessions_returns_created_session(
 
 
 @pytest.mark.asyncio
-async def test_session_resumes_with_conversation_history(
-    run_sh: Path, temp_cwd: Path
-) -> None:
+async def test_session_resumes_with_conversation_history(run_sh: Path) -> None:
     """
     Verify that when a session is resumed, the conversation history is replayed.
     This tests the full save/resume cycle.
     """
-    client = RecordingClient()
+    client = RecordingClient(prefix="acp_session_test_")
 
     # First interaction - create some conversation history
     session_id = await run_agent_with_session(
         client,
         run_sh,
         "My name is TestUser. Please remember this.",
-        cwd=str(temp_cwd),
     )
 
     logger.info("First interaction output:\n%s", client.all_text)
@@ -178,17 +166,18 @@ async def test_session_resumes_with_conversation_history(
     assert client.updates, "First interaction produced no updates"
 
     # Resume the same session and ask about the previous context
-    client2 = RecordingClient()
+    # Use same temp_dir as first client so session data is accessible
+    client_resumed = RecordingClient(prefix="acp_session_test_")
+    client_resumed.temp_dir = client.temp_dir  # Share temp dir with first client
     resumed_session_id = await run_agent_with_session(
-        client2,
+        client_resumed,
         run_sh,
         "What is my name that I just told you? Answer with just the name.",
-        cwd=str(temp_cwd),
         session_id=session_id,
     )
 
     logger.info("Resumed session: %s", resumed_session_id)
-    logger.info("Second interaction output:\n%s", client2.all_text)
+    logger.info("Second interaction output:\n%s", client_resumed.all_text)
 
     # Verify session ID is the same
     assert resumed_session_id == session_id, (
@@ -196,12 +185,12 @@ async def test_session_resumes_with_conversation_history(
     )
 
     # Verify second interaction worked
-    assert client2.updates, "Second interaction produced no updates"
+    assert client_resumed.updates, "Second interaction produced no updates"
 
     # The agent should demonstrate it remembers "TestUser" from the previous conversation
     # The resumed session should have replayed the history
-    response_text = client2.all_text
-    assert "TestUser" in response_text or len(client2.updates) > 0, (
+    response_text = client_resumed.all_text
+    assert "TestUser" in response_text or len(client_resumed.updates) > 0, (
         "Session resumption may have failed - no evidence of remembered context"
     )
 
@@ -211,24 +200,20 @@ async def test_session_isolation_between_cwds(run_sh: Path) -> None:
     """
     Verify that sessions in different working directories are isolated.
     """
-    temp_cwd1 = Path(tempfile.mkdtemp(prefix="acp_session_test_1_"))
-    temp_cwd2 = Path(tempfile.mkdtemp(prefix="acp_session_test_2_"))
+    client1 = RecordingClient(prefix="acp_session_test_1_")
+    client2 = RecordingClient(prefix="acp_session_test_2_")
 
     try:
-        client1 = RecordingClient()
         session_id1 = await run_agent_with_session(
             client1,
             run_sh,
             "This is session in directory one.",
-            cwd=str(temp_cwd1),
         )
 
-        client2 = RecordingClient()
         session_id2 = await run_agent_with_session(
             client2,
             run_sh,
             "This is session in directory two.",
-            cwd=str(temp_cwd2),
         )
 
         # Both sessions should work independently
@@ -249,40 +234,37 @@ async def test_session_isolation_between_cwds(run_sh: Path) -> None:
         ) as (conn, _proc):
             await conn.initialize(protocol_version=1)
 
-            list_response1 = await conn.list_sessions(cwd=str(temp_cwd1))
+            list_response1 = await conn.list_sessions(cwd=str(client1.temp_dir))
             session_ids1 = [s.session_id for s in list_response1.sessions]
             assert session_id1 in session_ids1, (
                 f"Session 1 {session_id1} not found in its directory"
             )
 
-            list_response2 = await conn.list_sessions(cwd=str(temp_cwd2))
+            list_response2 = await conn.list_sessions(cwd=str(client2.temp_dir))
             session_ids2 = [s.session_id for s in list_response2.sessions]
-            # Session 1 should NOT appear in temp_cwd2 (different DB)
+            # Session 1 should NOT appear in client2's temp_dir (different DB)
             assert session_id1 not in session_ids2, (
                 f"Session isolation failed: {session_id1} appeared in wrong directory"
             )
 
     finally:
-        import shutil
-
-        shutil.rmtree(temp_cwd1, ignore_errors=True)
-        shutil.rmtree(temp_cwd2, ignore_errors=True)
+        client1.cleanup()
+        client2.cleanup()
 
 
 @pytest.mark.asyncio
-async def test_session_replays_tool_calls(run_sh: Path, temp_cwd: Path) -> None:
+async def test_session_replays_tool_calls(run_sh: Path) -> None:
     """
     Verify that when a session is resumed, tool calls in the conversation history
     are replayed as ToolCallStart notifications.
     """
-    client_play = RecordingClient()
+    client_play = RecordingClient(prefix="acp_session_test_")
 
     # First interaction - ask agent to list files (should trigger a tool call)
     session_id = await run_agent_with_session(
         client_play,
         run_sh,
         "Use a tool skill to list files in the current directory.",
-        cwd=str(temp_cwd),
     )
 
     logger.info("First interaction output:\n%s", client_play.all_text)
@@ -293,12 +275,13 @@ async def test_session_replays_tool_calls(run_sh: Path, temp_cwd: Path) -> None:
     assert len(tool_calls_first) > 0, "Expected tool calls in first interaction"
 
     # Resume the same session
-    client_replay = RecordingClient()
+    # Use same temp_dir as first client so session data is accessible
+    client_replay = RecordingClient(prefix="acp_session_test_")
+    client_replay.temp_dir = client_play.temp_dir
     resumed_session_id = await run_agent_with_session(
         client_replay,
         run_sh,
         "Just say hello.",
-        cwd=str(temp_cwd),
         session_id=session_id,
     )
 

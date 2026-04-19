@@ -36,6 +36,56 @@ Meta-skills for managing tools:
 - Dynamic skill creation can potentially change the agent's virtual environment, as new dependencies may be installed (pending confirmation)
 - Users can add skills manually by editing `skills.py`, then ask for `reload_tool_skills` to pick up changes without restarting the agent.
 
+## Persistent Memory (Optional) **EXPERIMENTAL**
+
+The agent supports **persistent memory** powered by [Mem0](https://github.com/mem0ai/mem0), enabling it to remember facts, preferences, and past interactions across sessions.
+
+### Opt-In Configuration
+
+Memory is **disabled by default**. To enable it, set the `MEMORY` environment variable:
+
+```bash
+export MEMORY=true  # or "1", "yes", "on", "enabled"
+```
+
+### How Memory Works
+
+When enabled, the agent uses a two-tier memory system:
+
+1. **Collector** — At the end of each turn, saves conversation summaries to memory in the background
+   - **Heuristic memories**: Facts, architectural decisions, and conventions extracted from conversations
+   - **Historical memories**: Session summaries with concrete outcomes, problems encountered, and resolutions
+
+2. **Recollector** — Retrieves relevant memories and injects them into the system prompt
+   - **Heuristic memories**: Loaded once at session start (facts, preferences, conventions)
+   - **Historical memories**: Searched on every prompt for semantically relevant past sessions
+
+### Memory Scopes
+
+Memories are isolated per **project** based on the working directory (`cwd`).
+
+### Storage Location
+
+Memory files are stored at `~/.metalgate/memory/<project-name>/`:
+- `chroma/` — ChromaDB vector database for semantic search
+- `mem0_history.db` — SQLite database for conversation history
+
+### Pros and Cons
+
+**Pros:**
+- **Context continuity**: The agent remembers your preferences, coding style, and past decisions across sessions
+- **Resumability**: Interrupted work can be resumed more easily with relevant historical context
+- **Project knowledge**: Learns and retains architectural decisions and conventions specific to your project
+- **Privacy**: All conversation data is stored **locally** on your machine
+- **Context protection**: Not all stored memories are included in the main context window, reducing token usage and context bloating compared to naive history injection
+
+**Cons:**
+- **Experimental**: Feature is still in development and may have bugs
+- **Storage overhead**: Requires disk space for the vector database (Chroma) and SQLite history
+- **Initial latency**: First request may have slight latency while memory is queried
+- **Potential context noise**: Retrieved memories may add noise if not perfectly relevant to the current query
+- **Complexity**: Additional component that can fail or require troubleshooting
+
 ## Configuration Files
 
 ### AGENTS.md
@@ -44,7 +94,7 @@ An `AGENTS.md` file is supported and changes only the system prompt. Place it in
 
 ### MCP Configuration
 
-The agent supports MCP (Model Context Protocol) servers via the `mcp.yaml` configuration file. There, You can define MCP servers and tools that will be available to the agent.
+The agent supports MCP (Model Context Protocol) servers via the `mcp.yaml` configuration file. There, you can define MCP servers and tools that will be available to the agent.
 
 Example `mcp.yaml`:
 
@@ -112,6 +162,8 @@ mcpServers:
 
 Other providers and editors may work but are untested. Testers and PRs are welcome!
 
+> **Note:** Some versions of Zed exhibit instability with history replaying. This is currently under investigation.
+
 ## Requirements
 
 - Python 3.13+
@@ -122,7 +174,7 @@ Other providers and editors may work but are untested. Testers and PRs are welco
 ## Roadmap
 
 - [x] **Session reload** — Persist and restore conversation state across sessions
-- [ ] **Memory** — Long-term memory for cross-session context and learned patterns
+- [x] **Memory** — Long-term memory for cross-session context and learned patterns (via mem0)
 - [ ] **`SKILLS.md`** — Text-based skills could be supported in a later release for defining skills declaratively
 
 ## Contributing

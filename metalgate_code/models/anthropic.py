@@ -4,7 +4,7 @@ Anthropic model utilities for fetching and creating models.
 
 import logging
 import os
-from typing import no_type_check
+from typing import Any, no_type_check
 
 import requests
 from langchain_anthropic import ChatAnthropic
@@ -15,6 +15,33 @@ logger = logging.getLogger("metalgate_code")
 # API configuration
 ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
 ANTHROPIC_MODELS_ENDPOINT = f"{ANTHROPIC_BASE_URL}/models"
+
+
+def get_mem0_config() -> dict[str, Any]:
+    """
+    Get Mem0 configuration for Anthropic provider.
+
+    Anthropic doesn't provide embeddings, so we use OpenAI embeddings
+    with Anthropic LLM for Mem0.
+
+    Returns:
+        Dictionary with llm and embedder configuration for Mem0.
+    """
+    anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    openai_api_key = os.environ.get("OPENAI_API_KEY", "")
+    embedding_model = os.environ.get("EMBEDDINGS", "text-embedding-3-small")
+
+    config: dict[str, Any] = {
+        "llm": {
+            "provider": "anthropic",
+            "config": {"api_key": anthropic_api_key, "model": "claude-3-5-haiku-20241022"},
+        },
+        "embedder": {
+            "provider": "openai",
+            "config": {"api_key": openai_api_key, "model": embedding_model},
+        },
+    }
+    return config
 
 
 def fetch_models() -> list[dict[str, str]]:

@@ -13,8 +13,13 @@ from deepagents_cli.local_context import LocalContextMiddleware
 from langgraph.graph.state import CompiledStateGraph
 
 from metalgate_code.config import get_interrupt_config
-from metalgate_code.middleware.dynamic_tools import DynamicToolsMiddleware
-from metalgate_code.middleware.tool_skills import ToolSkillsMiddleware
+from metalgate_code.memory.store import MemoryStore
+from metalgate_code.middleware import (
+    CollectorMiddleware,
+    DynamicToolsMiddleware,
+    RecollectorMiddleware,
+    ToolSkillsMiddleware,
+)
 from metalgate_code.models import create_chat_model
 from metalgate_code.skills import (
     create_tool_skill,
@@ -26,6 +31,21 @@ from metalgate_code.skills import (
 from metalgate_code.skills.registry_mcp import registry_mcp
 
 logger = logging.getLogger("metalgate_code")
+
+
+def _is_memory_enabled() -> bool:
+    """Check if memory is enabled via environment variable."""
+    return os.environ.get("MEMORY", "").lower() in ("true", "1", "yes", "on", "enabled")
+
+
+def _get_userid() -> str:
+    """Get the user ID from environment variable.
+
+    Returns:
+        The user ID if set in the USER environment variable, otherwise None.
+    """
+    return os.environ.get("USER", "anonymous")
+
 
 META_SKILLS = [
     create_tool_skill,
@@ -41,18 +61,18 @@ def _build_agent(
     """Agent factory based on the given root directory."""
     logger.info("Model: %s", context.model)
 
-    _root_dir = context.cwd
+    cwd = context.cwd
     # Load project tool skills
-    logger.info("Loading tool skills from %s", _root_dir)
-    registry.load(_root_dir)
+    logger.info("Loading tool skills from %s", cwd)
+    registry.load(cwd)
     # Load project MCP tools
-    logger.info("Loading MCP tools from %s", _root_dir)
-    registry_mcp.load(_root_dir)
+    logger.info("Loading MCP tools from %s", cwd)
+    registry_mcp.load(cwd)
 
     interrupt_config = get_interrupt_config(context.mode)
 
     # Load AGENTS.md if it exists and add to system prompt
-    agents_md_path = os.path.join(_root_dir, "AGENTS.md")
+    agents_md_path = os.path.join(cwd, "AGENTS.md")
     agents_md_content = ""
     if os.path.isfile(agents_md_path):
         try:
@@ -68,7 +88,7 @@ def _build_agent(
     # Provides `execute` tool via FilesystemMiddleware with per-command
     # timeout support.
     shell_backend = LocalShellBackend(
-        root_dir=_root_dir,
+        root_dir=cwd,
         inherit_env=True,
         env=shell_env,
     )
@@ -100,6 +120,15 @@ def _build_agent(
 
     system_prompt = "\n".join(system_prompt_parts)
 
+    # Initialize memory if enabled
+    memory = None
+    if _is_memory_enabled():
+        try:
+            memory = MemoryStore(cwd=cwd, user_id=_get_userid())
+            logger.info("Memory enabled for project: %s", cwd)
+        except Exception as e:
+            logger.warning("Failed to initialize memory: %s", e)
+
     return create_deep_agent(
         # Falls back to Deep Agent default model if not provided
         model=model,
@@ -107,8 +136,10 @@ def _build_agent(
         interrupt_on=interrupt_config,
         middleware=[
             LocalContextMiddleware(backend=backend),
+            RecollectorMiddleware(memory=memory),
             ToolSkillsMiddleware(),
             DynamicToolsMiddleware(),
+            CollectorMiddleware(memory=memory),
         ],
         tools=META_SKILLS,
         system_prompt=system_prompt,

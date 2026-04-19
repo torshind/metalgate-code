@@ -30,7 +30,7 @@ class ToolSkillsMiddleware(AgentMiddleware):
             tools=list(request.tools or []) + current_skills + current_mcp_tools
         )
 
-        logger.info(f"Request tools: {request.tools}")
+        logger.debug(f"Request tools: {request.tools}")
 
         return request
 

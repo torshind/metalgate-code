@@ -4,9 +4,12 @@ Shared ACP client code - NOT conftest.py to avoid ACP interference.
 
 import asyncio
 import logging
+import shutil
+import tempfile
 from collections.abc import Generator
 from pathlib import Path
-from typing import Any
+from types import TracebackType
+from typing import Any, Self
 
 import pytest
 from acp import spawn_agent_process, text_block
@@ -44,13 +47,30 @@ AGENT_TIMEOUT = 300
 
 
 class RecordingClient(Client):
-    """ACP client that records updates and auto-approves permissions."""
+    """ACP client that records updates and auto-approves permissions with a temp working directory."""
 
-    def __init__(self) -> None:
+    def __init__(self, prefix: str = "acp_test_") -> None:
+        self.prefix = prefix
+        self.temp_dir: Path = Path(tempfile.mkdtemp(prefix=self.prefix))
         self.updates: list[Any] = []
         self.written_files: list[str] = []
         self.approved_options: list[str] = []
         self.denied_requests: list[str] = []
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        self.cleanup()
+
+    def cleanup(self) -> None:
+        """Remove the temp working directory."""
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     @param_model(RequestPermissionRequest)
     async def request_permission(self, options, session_id, tool_call, **kwargs):
@@ -74,7 +94,7 @@ class RecordingClient(Client):
         if isinstance(update, ToolCallStart) and update.kind == "edit":
             for block in update.content or []:
                 if hasattr(block, "path"):
-                    self.written_files.append(block.path)
+                    self.written_files.append(str(Path(block.path).resolve()))
 
     @param_model(ReadTextFileRequest)
     async def read_text_file(self, path, session_id, limit=None, line=None, **kwargs):
@@ -96,7 +116,7 @@ class RecordingClient(Client):
     async def write_text_file(self, content, path, session_id, **kwargs):
         logger.info("WRITE %s", path)
         Path(path).write_text(content, encoding="utf-8")
-        self.written_files.append(path)
+        self.written_files.append(str(Path(path).resolve()))
         return WriteTextFileResponse()
 
     @param_model(CreateTerminalRequest)
@@ -169,7 +189,10 @@ def run_sh() -> Generator[Path, None, None]:
 async def run_agent(
     client: RecordingClient, run_sh: Path, prompt: str, timeout: int = AGENT_TIMEOUT
 ) -> None:
-    """Spawn the agent, run a single prompt, and wait for it to finish."""
+    """Spawn the agent, run a single prompt, and wait for it to finish.
+
+    Returns the session_id used for the session.
+    """
     logger.info("Starting agent: %s", run_sh)
     async with spawn_agent_process(
         client,
@@ -179,7 +202,7 @@ async def run_agent(
         await conn.initialize(protocol_version=1)
         logger.info("Initializing...")
         session = await conn.new_session(
-            cwd=str(run_sh.parent),
+            cwd=str(client.temp_dir),
             mcp_servers=[],
         )
         logger.info("Session: %s", session.session_id)
