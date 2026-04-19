@@ -81,6 +81,7 @@ Memory files are stored at `~/.metalgate/memory/<project-name>/`:
 
 **Cons:**
 - **Experimental**: Feature is still in development and may have bugs
+- **Token usage**: Higher token consumption due to Mem0's LLM calls for memory extraction and retrieval
 - **Storage overhead**: Requires disk space for the vector database (Chroma) and SQLite history
 - **Initial latency**: First request may have slight latency while memory is queried
 - **Potential context noise**: Retrieved memories may add noise if not perfectly relevant to the current query
