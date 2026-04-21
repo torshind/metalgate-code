@@ -9,7 +9,7 @@ from typing import Any
 from mem0 import AsyncMemory
 
 from metalgate_code.memory.config import (
-    DEFAULT_HISTORICAL_LIMIT,
+    DEFAULT_EPISODIC_LIMIT,
 )
 from metalgate_code.memory.paths import get_memory_data_dir
 from metalgate_code.models.provider import get_mem0_config
@@ -79,7 +79,7 @@ class MemoryStore:
         self,
         query: str,
         agent_id: str,
-        limit: int = DEFAULT_HISTORICAL_LIMIT,
+        limit: int = DEFAULT_EPISODIC_LIMIT,
     ) -> dict[str, Any]:
         """
         Search memories by query.
