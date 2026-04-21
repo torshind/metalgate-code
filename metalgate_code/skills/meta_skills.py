@@ -50,6 +50,7 @@ def create_tool_skill(
     """
     Create and register a new tool skill.
     code must define exactly one @tool decorated function named `name`, with a docstring.
+    @tool decorator is already imported from langchain_core.tools.
     dependencies: optional list of pip package names to install before registering.
     """
     # 1. Install dependencies if needed
@@ -119,8 +120,12 @@ def reload_tool_skills() -> str:
 @tool
 def delete_tool_skill(name: str) -> str:
     """Remove a tool skill by name from skills.py and the live registry."""
-    with open("skills.py") as f:
-        source = f.read()
+    skills_path = registry.skills_path
+    if not skills_path.exists():
+        return "No tool skill to delete."
+
+    source = skills_path.read_text()
+
     tree = ast.parse(source)
 
     target = next(
@@ -140,7 +145,6 @@ def delete_tool_skill(name: str) -> str:
         if target.decorator_list
         else target.lineno - 1
     )
-    with open("skills.py", "w") as f:
-        f.write("".join(lines[:start] + lines[target.end_lineno :]))
+    skills_path.write_text("".join(lines[:start] + lines[target.end_lineno :]))
     registry.reload()
     return f"Tool skill '{name}' deleted."
