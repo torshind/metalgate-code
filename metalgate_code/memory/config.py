@@ -3,20 +3,20 @@ Mem0 memory configuration constants.
 """
 
 # Agent IDs for scoping memories
-HEURISTIC_AGENT_ID = "heuristic"  # Extracted facts, preferences, project patterns
-HISTORICAL_AGENT_ID = "historical"  # Session summaries
+SEMANTIC_AGENT_ID = "semantic"  # Extracted facts, preferences, project patterns
+EPISODIC_AGENT_ID = "episodic"  # Session summaries
 
 # Default memory limits
-DEFAULT_HISTORICAL_LIMIT = 5
+DEFAULT_EPISODIC_LIMIT = 5
 
 
-HEURISTIC_INSTRUCTIONS = """
+SEMANTIC_INSTRUCTIONS = """
 Only extract facts that remain true and relevant beyond this session:
 architectural decisions, technical conventions, and stable user preferences about the codebase and the tooling.
 Ignore anything that is specific to the current task or temporary in nature.
 """
 
-HISTORICAL_INSTRUCTIONS = """
+EPISODIC_INSTRUCTIONS = """
 Extract memories from this coding session for future retrieval.
 
 EXTRACT:

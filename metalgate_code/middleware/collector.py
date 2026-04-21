@@ -16,11 +16,11 @@ from langchain_core.messages import BaseMessage
 from langgraph.runtime import Runtime
 
 from metalgate_code.memory import (
-    HEURISTIC_AGENT_ID,
-    HEURISTIC_INSTRUCTIONS,
-    HISTORICAL_AGENT_ID,
+    EPISODIC_AGENT_ID,
+    EPISODIC_INSTRUCTIONS,
+    SEMANTIC_AGENT_ID,
+    SEMANTIC_INSTRUCTIONS,
 )
-from metalgate_code.memory.config import HISTORICAL_INSTRUCTIONS
 from metalgate_code.memory.store import MemoryStore
 
 logger = logging.getLogger("metalgate_code")
@@ -31,8 +31,8 @@ class CollectorMiddleware(AgentMiddleware):
     Middleware that stores session summaries to Mem0 at session end.
 
     Writes to two memory scopes:
-    - Heuristic: Messages with infer=True (Mem0 extracts facts)
-    - Historical: Summary with infer=False (stored as-is)
+    - Semantic: General facts, conventions, preferences (Mem0 extracts facts)
+    - Episodic: Session summaries and specific experiences
     """
 
     def __init__(
@@ -107,7 +107,7 @@ class CollectorMiddleware(AgentMiddleware):
         request: ModelRequest,
     ) -> None:
         """
-        Store memories to both heuristic and historical scopes.
+        Store memories to both semantic and episodic scopes.
 
         Args:
             request: ModelRequest containing messages and state.
@@ -125,33 +125,27 @@ class CollectorMiddleware(AgentMiddleware):
         message_dicts = self._convert_messages(new_messages)
         logger.info(f"Storing {len(message_dicts)} messages")
 
-        # Store to heuristic scope with inference
+        # Store to semantic scope with inference
         try:
-            await self._memory.store.add(
-                message_dicts,
-                user_id=self._memory.user_id,
-                agent_id=HEURISTIC_AGENT_ID,
-                run_id=self._memory.project_id,
-                infer=True,
-                prompt=HEURISTIC_INSTRUCTIONS,
+            await self._memory.add(
+                messages=message_dicts,
+                agent_id=SEMANTIC_AGENT_ID,
+                prompt=SEMANTIC_INSTRUCTIONS,
             )
         except Exception as e:
             # Log but don't fail the session
-            logger.error(f"Failed to store heuristic memory: {e}")
+            logger.error(f"Failed to store semantic memory: {e}")
 
-        # Store to historical scope
+        # Store to episodic scope
         try:
-            await self._memory.store.add(
-                message_dicts,
-                user_id=self._memory.user_id,
-                agent_id=HISTORICAL_AGENT_ID,
-                run_id=self._memory.project_id,
-                infer=True,
-                prompt=HISTORICAL_INSTRUCTIONS,
+            await self._memory.add(
+                messages=message_dicts,
+                agent_id=EPISODIC_AGENT_ID,
+                prompt=EPISODIC_INSTRUCTIONS,
             )
         except Exception as e:
             # Log but don't fail the session
-            logger.error(f"Failed to store historical memory: {e}")
+            logger.error(f"Failed to store episodic memory: {e}")
 
     async def aafter_agent(
         self, state: StateT, runtime: Runtime[ContextT]

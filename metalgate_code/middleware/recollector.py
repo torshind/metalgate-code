@@ -10,9 +10,9 @@ from langchain.agents.middleware.types import AgentMiddleware, ModelRequest
 from langchain_core.messages import SystemMessage
 
 from metalgate_code.memory.config import (
-    DEFAULT_HISTORICAL_LIMIT,
-    HEURISTIC_AGENT_ID,
-    HISTORICAL_AGENT_ID,
+    DEFAULT_EPISODIC_LIMIT,
+    EPISODIC_AGENT_ID,
+    SEMANTIC_AGENT_ID,
 )
 from metalgate_code.memory.store import MemoryStore
 
@@ -56,7 +56,7 @@ class RecollectorMiddleware(AgentMiddleware):
         request: ModelRequest,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """
-        Search both heuristic and historical memories in parallel.
+        Search both semantic and episodic memories in parallel.
 
         Args:
             query: The search query (first user message).
@@ -64,72 +64,66 @@ class RecollectorMiddleware(AgentMiddleware):
             project: The project name.
 
         Returns:
-            Tuple of (heuristic_results, historical_results).
+            Tuple of (semantic_results, episodic_results).
         """
         if self._memory is None:
             return [], []
 
-        heuristic_task = None
+        semantic_task = None
         if self._is_first_message(request):
-            heuristic_task = self._memory.store.get_all(
-                user_id=self._memory.user_id,
-                agent_id=HEURISTIC_AGENT_ID,
-                run_id=self._memory.project_id,
-            )
+            semantic_task = self._memory.get_all(agent_id=SEMANTIC_AGENT_ID)
 
-        historical_task = self._memory.store.search(
+        episodic_task = self._memory.search(
             query=self._get_latest_message(request),
-            user_id=self._memory.user_id,
-            agent_id=HISTORICAL_AGENT_ID,
-            run_id=self._memory.project_id,
-            limit=DEFAULT_HISTORICAL_LIMIT,
+            agent_id=EPISODIC_AGENT_ID,
+            limit=DEFAULT_EPISODIC_LIMIT,
         )
 
-        if heuristic_task:
-            heuristic, historical = await asyncio.gather(
-                heuristic_task, historical_task, return_exceptions=False
+        if semantic_task:
+            semantic, episodic = await asyncio.gather(
+                semantic_task, episodic_task, return_exceptions=False
             )
         else:
-            heuristic = {}
-            historical = await historical_task
+            semantic = {}
+            episodic = await episodic_task
 
-        for name, result in [("heuristic", heuristic), ("historical", historical)]:
+        for name, result in [("semantic", semantic), ("episodic", episodic)]:
             logger.info(f"{name}: type={type(result)}, value={result!r}")
 
         # Extract results from response dicts
-        heuristic_results = heuristic.get("results", [])
-        historical_results = historical.get("results", [])
+        semantic_results = semantic.get("results", [])
+        episodic_results = episodic.get("results", [])
 
-        return heuristic_results, historical_results
+        return semantic_results, episodic_results
 
     def _format_memories(
         self,
-        heuristic_results: list[dict[str, Any]],
-        historical_results: list[dict[str, Any]],
+        semantic_results: list[dict[str, Any]],
+        episodic_results: list[dict[str, Any]],
     ) -> str:
         """
         Format memory results for injection into system message.
 
         Args:
-            heuristic_results: List of heuristic memory results.
-            historical_results: List of historical memory results.
+            semantic_results: List of semantic memory results.
+            episodic_results: List of episodic memory results.
 
         Returns:
             Formatted memory context string.
         """
         parts = ["## Relevant Context\n"]
 
-        if heuristic_results:
+        if semantic_results:
             parts.append("### Memories")
-            for result in heuristic_results:
+            for result in semantic_results:
                 memory_text = result.get("memory", "")
                 if memory_text:
                     parts.append(f"- {memory_text}")
             parts.append("")
 
-        if historical_results:
+        if episodic_results:
             parts.append("### Related Conversations")
-            for result in historical_results:
+            for result in episodic_results:
                 if (id := result.get("id")) not in self._injection_cache:
                     self._injection_cache.add(id)
                     memory_text = result.get("memory", "")
@@ -146,14 +140,14 @@ class RecollectorMiddleware(AgentMiddleware):
         logger.debug(f"Searching memories for request: {request}")
 
         # Search memories
-        heuristic_results, historical_results = await self._collect_memories(request)
+        semantic_results, episodic_results = await self._collect_memories(request)
 
         # If no memories found, skip injection
-        if not heuristic_results and not historical_results:
+        if not semantic_results and not episodic_results:
             return await handler(request)
 
         # Format and inject context into system message
-        context = self._format_memories(heuristic_results, historical_results)
+        context = self._format_memories(semantic_results, episodic_results)
 
         # Build new system message with context prepended
         existing_system_message = request.system_message or SystemMessage(content="")

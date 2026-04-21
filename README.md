@@ -53,12 +53,12 @@ export MEMORY=true  # or "1", "yes", "on", "enabled"
 When enabled, the agent uses a two-tier memory system:
 
 1. **Collector** — At the end of each turn, saves conversation summaries to memory in the background
-   - **Heuristic memories**: Facts, architectural decisions, and conventions extracted from conversations
-   - **Historical memories**: Session summaries with concrete outcomes, problems encountered, and resolutions
+   - **Semantic memories**: Facts, architectural decisions, and conventions extracted from conversations
+   - **Episodic memories**: Session summaries with concrete outcomes, problems encountered, and resolutions
 
 2. **Recollector** — Retrieves relevant memories and injects them into the system prompt
-   - **Heuristic memories**: Loaded once at session start (facts, preferences, conventions)
-   - **Historical memories**: Searched on every prompt for semantically relevant past sessions
+   - **Semantic memories**: Loaded once at session start (facts, preferences, conventions)
+   - **Episodic memories**: Searched on every prompt for semantically relevant past sessions
 
 ### Memory Scopes
 
@@ -74,7 +74,7 @@ Memory files are stored at `~/.metalgate/memory/<project-name>/`:
 
 **Pros:**
 - **Context continuity**: The agent remembers your preferences, coding style, and past decisions across sessions
-- **Resumability**: Interrupted work can be resumed more easily with relevant historical context
+- **Resumability**: Interrupted work can be resumed more easily with relevant episodic context
 - **Project knowledge**: Learns and retains architectural decisions and conventions specific to your project
 - **Privacy**: All conversation data is stored **locally** on your machine
 - **Context protection**: Not all stored memories are included in the main context window, reducing token usage and context bloating compared to naive history injection
