@@ -71,17 +71,11 @@ class RecollectorMiddleware(AgentMiddleware):
 
         heuristic_task = None
         if self._is_first_message(request):
-            heuristic_task = self._memory.store.get_all(
-                user_id=self._memory.user_id,
-                agent_id=HEURISTIC_AGENT_ID,
-                run_id=self._memory.project_id,
-            )
+            heuristic_task = self._memory.get_all(agent_id=HEURISTIC_AGENT_ID)
 
-        historical_task = self._memory.store.search(
+        historical_task = self._memory.search(
             query=self._get_latest_message(request),
-            user_id=self._memory.user_id,
             agent_id=HISTORICAL_AGENT_ID,
-            run_id=self._memory.project_id,
             limit=DEFAULT_HISTORICAL_LIMIT,
         )
 

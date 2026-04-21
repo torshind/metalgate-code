@@ -127,12 +127,9 @@ class CollectorMiddleware(AgentMiddleware):
 
         # Store to heuristic scope with inference
         try:
-            await self._memory.store.add(
-                message_dicts,
-                user_id=self._memory.user_id,
+            await self._memory.add(
+                messages=message_dicts,
                 agent_id=HEURISTIC_AGENT_ID,
-                run_id=self._memory.project_id,
-                infer=True,
                 prompt=HEURISTIC_INSTRUCTIONS,
             )
         except Exception as e:
@@ -141,12 +138,9 @@ class CollectorMiddleware(AgentMiddleware):
 
         # Store to historical scope
         try:
-            await self._memory.store.add(
-                message_dicts,
-                user_id=self._memory.user_id,
+            await self._memory.add(
+                messages=message_dicts,
                 agent_id=HISTORICAL_AGENT_ID,
-                run_id=self._memory.project_id,
-                infer=True,
                 prompt=HISTORICAL_INSTRUCTIONS,
             )
         except Exception as e:
