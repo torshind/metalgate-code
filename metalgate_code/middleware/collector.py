@@ -128,39 +128,32 @@ class CollectorMiddleware(AgentMiddleware):
         message_dicts = self._convert_messages(new_messages)
         logger.info(f"Storing {len(message_dicts)} messages")
 
-        # Store to user scope (cross-project memories)
-        try:
-            await self._memory.add(
-                messages=message_dicts,
-                agent_id=USER_AGENT_ID,
-                project_scoped=False,
-                prompt=USER_INSTRUCTIONS,
-            )
-        except Exception as e:
-            # Log but don't fail the session
-            logger.error(f"Failed to store user memory: {e}")
+        # Store scopes concurrently
+        user_task = self._memory.add(
+            messages=message_dicts,
+            agent_id=USER_AGENT_ID,
+            project_scoped=False,
+            prompt=USER_INSTRUCTIONS,
+        )
+        semantic_task = self._memory.add(
+            messages=message_dicts,
+            agent_id=SEMANTIC_AGENT_ID,
+            prompt=SEMANTIC_INSTRUCTIONS,
+        )
+        episodic_task = self._memory.add(
+            messages=message_dicts,
+            agent_id=EPISODIC_AGENT_ID,
+            prompt=EPISODIC_INSTRUCTIONS,
+        )
 
-        # Store to semantic scope with inference
-        try:
-            await self._memory.add(
-                messages=message_dicts,
-                agent_id=SEMANTIC_AGENT_ID,
-                prompt=SEMANTIC_INSTRUCTIONS,
-            )
-        except Exception as e:
-            # Log but don't fail the session
-            logger.error(f"Failed to store semantic memory: {e}")
+        results = await asyncio.gather(
+            user_task, semantic_task, episodic_task, return_exceptions=False
+        )
 
-        # Store to episodic scope
-        try:
-            await self._memory.add(
-                messages=message_dicts,
-                agent_id=EPISODIC_AGENT_ID,
-                prompt=EPISODIC_INSTRUCTIONS,
-            )
-        except Exception as e:
-            # Log but don't fail the session
-            logger.error(f"Failed to store episodic memory: {e}")
+        tasks = ["user", "semantic", "episodic"]
+        for scope, result in zip(tasks, results):
+            if isinstance(result, Exception):
+                logger.error(f"Failed to store {scope} memory: {result}")
 
     async def aafter_agent(
         self, state: StateT, runtime: Runtime[ContextT]
