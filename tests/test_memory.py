@@ -21,6 +21,7 @@ async def run_agent_with_memory(
     prompt: str,
     memory_enabled: bool = True,
     session_id: str | None = None,
+    user_id: str = "test_user",
     timeout: int = AGENT_TIMEOUT,
 ) -> str:
     """Spawn the agent and run a prompt with optional memory enabled.
@@ -33,6 +34,8 @@ async def run_agent_with_memory(
         env["MEMORY"] = "true"
     else:
         env.pop("MEMORY", None)
+
+    env["USER"] = user_id
 
     logger.info("Starting agent with memory=%s: %s", memory_enabled, run_sh)
 
@@ -80,14 +83,15 @@ async def run_agent_with_memory(
 
 
 @pytest.mark.asyncio
-async def test_memory_extracts_and_retrieves_preferences(run_sh: Path) -> None:
+async def test_memory_session(run_sh: Path) -> None:
     """
-    E2E test: Verify Mem0 extracts preferences in session 1
-    and retrieves them in session 2.
+    E2E test: Verify Mem0 extracts preferences cross-session.
 
-    Session 1: User states a preference ("I always use pytest")
-    Session 2: New session asks what testing framework user prefers
-    Expected: Agent should remember "pytest" from Mem0
+    Session 1: User states a project specific statement
+    Session 2: New session asks about that
+    Expected: Agent should remember it
+    Session 3: New session and different project, same question
+    Expected: Agent shouldn't remember it
     """
     # Session 1: Share something memorable
     client_share = RecordingClient(prefix="memory_e2e_test_")
@@ -95,110 +99,163 @@ async def test_memory_extracts_and_retrieves_preferences(run_sh: Path) -> None:
         client_share,
         run_sh,
         "You are a coding agent with an embedded automatic memory. "
-        "My name is Alice and I want you to know that I always use pytest for testing.",
+        "My name is Alice, I'm starting a new Python project using FastAPI and pytest.",
         memory_enabled=True,
     )
 
-    logger.info("Session 1 output:\n%s", client_share.all_text)
-    assert client_share.updates, "Session 1 produced no updates"
+    logger.info("Sharing session output:\n%s", client_share.all_text)
+    assert client_share.updates, "Sharing session produced no updates"
 
-    # Session 2: New session - ask what testing framework to use
+    # Session 2: New session - ask what API framework to use
     client_ask = RecordingClient(prefix="memory_e2e_test_")
     client_ask.temp_dir = client_share.temp_dir  # Share temp dir with first client
     await run_agent_with_memory(
         client_ask,
         run_sh,
-        "I'm starting a new Python project. Based on my preferences, "
-        'what testing framework should I use? Just answer with the framework name or "I don\'t know".',
+        "I'm continuing this Python project. Based on my preferences, "
+        'which API framework should I use? Just answer with the framework name or "I don\'t know".',
         memory_enabled=True,
     )
 
-    logger.info("Session 2 output:\n%s", client_ask.all_text)
+    logger.info("Asking session output:\n%s", client_ask.all_text)
+    assert client_ask.updates, "Asking session produced no updates"
+
+    # The agent should remember "fastapi" from session 1's memory
+    response_text = "".join(
+        c for c in client_ask.all_text.lower() if c.isprintable() and not c.isspace()
+    )
+    # Look for FastAPI in the response
+    assert "fastapi" in response_text, "Agent did not remember fastapi from memory"
+
+    # Session 3: New session, new project
+    client_ask = RecordingClient(prefix="memory_e2e_test_")
+    await run_agent_with_memory(
+        client_ask,
+        run_sh,
+        "I'm starting a new golang project. Based on my preferences, "
+        'which API framework should I use? Just answer with the framework name or "I don\'t know".',
+        memory_enabled=True,
+    )
+
+    logger.info("Asking session output:\n%s", client_ask.all_text)
+    assert client_ask.updates, "Asking session produced no updates"
+
+    # The agent should NOT remember "FastAPI" from session 1's memory
+    response_text = "".join(
+        c for c in client_ask.all_text.lower() if c.isprintable() and not c.isspace()
+    )
+    # Look for FastAPI in the response
+    assert "fastapi" not in response_text, (
+        "Agent remembered fastapi from another project's memory"
+    )
+
+
+@pytest.mark.asyncio
+async def test_memory_user(run_sh: Path) -> None:
+    """
+    E2E test: Verify Mem0 extracts preferences cross-project.
+
+    Session 1: User states a preference ("My name is Alice")
+    Session 2: New session asks about user's name
+    Expected: Agent should remember it
+    Session 3: New session and same project but different user asks about user's name
+    Expected: Agent shouldn't remember it
+    """
+    # Session 1: Share something memorable
+    client_share = RecordingClient(prefix="memory_e2e_test_")
+    await run_agent_with_memory(
+        client_share,
+        run_sh,
+        "You are a coding agent with an embedded automatic memory. "
+        "My name is Alice and I want you to remember me.",
+        memory_enabled=True,
+    )
+
+    logger.info("Sharing session output:\n%s", client_share.all_text)
+    assert client_share.updates, "Sharing session produced no updates"
+
+    # Session 2: New session - ask user's name
+    client_ask = RecordingClient(prefix="memory_e2e_test_")
+    await run_agent_with_memory(
+        client_ask,
+        run_sh,
+        "I'm starting a new project. Who am I?"
+        'Just answer with my name or "I don\'t know".',
+        memory_enabled=True,
+    )
+
+    logger.info("Asking session output:\n%s", client_ask.all_text)
+    assert client_ask.updates, "Asking session produced no updates"
+
+    # The agent should remember "Alice" from session 1's memory
+    response_text = "".join(
+        c for c in client_ask.all_text.lower() if c.isprintable() and not c.isspace()
+    )
+    # Look for Alice in the response
+    assert "alice" in response_text, "Agent did not remember Alice from memory"
+
+    # Session 2: New session, same project, different user
+    client_ask = RecordingClient(prefix="memory_e2e_test_")
+    client_ask.temp_dir = client_share.temp_dir  # Share temp dir with first client
+    await run_agent_with_memory(
+        client_ask,
+        run_sh,
+        "I'm starting a new project. Who am I?"
+        'Just answer with my name or "I don\'t know".',
+        user_id="new_user",
+        memory_enabled=True,
+    )
+
+    logger.info("Asking session output:\n%s", client_ask.all_text)
+    assert client_ask.updates, "Asking session produced no updates"
+
+    # The agent should not remember "Alice" from session 1's memory
+    response_text = "".join(
+        c for c in client_ask.all_text.lower() if c.isprintable() and not c.isspace()
+    )
+    # Look for Alice in the response
+    assert "alice" not in response_text, "Agent did not remember Alice from memory"
+
+
+@pytest.mark.asyncio
+async def test_memory_disabled_when_env_not_set(run_sh: Path) -> None:
+    """
+    Verify that when MEMORY env var is not set, memory middleware
+    is not active.
+    """
+    # Session 1: Share something memorable WITHOUT memory enabled
+    client_share = RecordingClient()
+    await run_agent_with_memory(
+        client_share,
+        run_sh,
+        "You are a coding agent with disabled embedded memory. "
+        "You are going to forget what I am going to say. "
+        "My name is Alice and I prefer JavaScript over Python.",
+        memory_enabled=False,  # Memory disabled
+    )
+
+    logger.info("Session 1 (memory disabled) output:\n%s", client_share.all_text)
+    assert client_share.updates, "Session 1 produced no updates"
+
+    # Session 2: Ask about preference WITHOUT memory
+    client_ask = RecordingClient()
+    client_ask.temp_dir = client_share.temp_dir  # Share temp dir with first client
+    await run_agent_with_memory(
+        client_ask,
+        run_sh,
+        "What programming language do I prefer?"
+        'Just answer with the language name or "I don\'t know".',
+        memory_enabled=False,
+    )
+
+    logger.info("Session 2 (memory disabled) output:\n%s", client_ask.all_text)
     assert client_ask.updates, "Session 2 produced no updates"
 
-    # The agent should remember "pytest" from session 1's memory
-    response_text = client_ask.all_text.lower()
-    # Look for pytest in the response
-    assert "pytest" in response_text, "Agent did not remember pytest from memory"
-
-
-# @pytest.mark.asyncio
-# async def test_memory_disabled_when_env_not_set(run_sh: Path) -> None:
-#     """
-#     Verify that when MEMORY env var is not set, memory middleware
-#     is not active (no errors, just doesn't store/retrieve).
-#     """
-#     # Session 1: Share something memorable WITHOUT memory enabled
-#     client_share = RecordingClient()
-#     session_share = await run_agent_with_memory(
-#         client_share,
-#         run_sh,
-#         "You are a coding agent with disabled embedded memory. "
-#         "You are going to forget what I am going to say. "
-#         "My name is Alice and I prefer unittest over pytest.",
-#         memory_enabled=False,  # Memory disabled
-#     )
-
-#     logger.info("Session 1 (memory disabled) output:\n%s", client_share.all_text)
-#     assert client_share.updates, "Session 1 produced no updates"
-
-#     # Session 2: Ask about preference WITHOUT memory
-#     client_ask = RecordingClient()
-#     session_ask = await run_agent_with_memory(
-#         client_ask,
-#         run_sh,
-#         "What testing framework do I prefer?",
-#         memory_enabled=False,
-#     )
-
-#     logger.info("Session 2 (memory disabled) output:\n%s", client_ask.all_text)
-#     assert client_ask.updates, "Session 2 produced no updates"
-
-#     # Sessions should work even without memory
-#     assert session_share != session_ask, "Sessions should be different"
-#     logger.info("SUCCESS: Agent works without MEMORY env var")
-
-
-# @pytest.mark.asyncio
-# async def test_memory_isolated_between_projects(run_sh: Path) -> None:
-#     """
-#     Verify that memories are isolated between different projects/directories.
-#     """
-#     temp_cwd1 = Path(tempfile.mkdtemp(prefix="memory_project1_"))
-#     temp_cwd2 = Path(tempfile.mkdtemp(prefix="memory_project2_"))
-
-#     try:
-#         # Project 1: Store memory
-#         client_project1 = RecordingClient()
-#         await run_agent_with_memory(
-#             client_project1,
-#             run_sh,
-#             "You are a coding agent with enabled embedded memory. "
-#             "My favorite color is blue.",
-#             cwd=str(temp_cwd1),
-#             memory_enabled=True,
-#         )
-
-#         logger.info("Project 1 output:\n%s", client_project1.all_text)
-#         assert client_project1.updates, "Project 1 session produced no updates"
-
-#         # Project 2: Should not have access to Project 1's memory
-#         client_project2 = RecordingClient()
-#         await run_agent_with_memory(
-#             client_project2,
-#             run_sh,
-#             "You are a coding agent with enabled embedded memory. "
-#             "What's my favorite color?",
-#             cwd=str(temp_cwd2),
-#             memory_enabled=True,
-#         )
-
-#         logger.info("Project 2 output:\n%s", client_project2.all_text)
-#         assert client_project2.updates, "Project 2 session produced no updates"
-
-#         # Verify both projects work independently
-#         logger.info("SUCCESS: Projects have isolated memory storage")
-
-#     finally:
-#         shutil.rmtree(temp_cwd1, ignore_errors=True)
-#         shutil.rmtree(temp_cwd2, ignore_errors=True)
+    # The agent should NOT remember "JavaScript" from session 1's memory
+    response_text = "".join(
+        c for c in client_ask.all_text.lower() if c.isprintable() and not c.isspace()
+    )
+    # Look for "JavaScript" in the response
+    assert "javascript" not in response_text, (
+        "Agent remembered javascript with disabled memory"
+    )

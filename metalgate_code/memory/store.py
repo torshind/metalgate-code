@@ -47,15 +47,15 @@ class MemoryStore:
 
     def _create_memory_store(self, cwd: str) -> AsyncMemory:
         """
-        Create and configure an AsyncMemory instance.
+        Create and configure a Mem0 AsyncMemory instance.
 
         Args:
-            data_dir: Directory for storing memory data (Qdrant + SQLite).
+            data_dir: Directory for storing memory data (Chroma + SQLite).
 
         Returns:
             Configured AsyncMemory instance.
         """
-        data_dir = get_memory_data_dir(cwd)
+        data_dir = get_memory_data_dir()
 
         # Get provider-specific Mem0 configuration
         provider_config = get_mem0_config()
@@ -66,7 +66,7 @@ class MemoryStore:
                 "provider": "chroma",
                 "config": {
                     "path": str(data_dir / "chroma"),
-                    "collection_name": self.project_id + "_" + self.user_id,
+                    "collection_name": "metalgate_" + self.user_id,
                 },
             },
             "history_db_path": str(data_dir / "mem0_history.db"),
@@ -79,6 +79,7 @@ class MemoryStore:
         self,
         query: str,
         agent_id: str,
+        project_scoped: bool = True,
         limit: int = DEFAULT_EPISODIC_LIMIT,
     ) -> dict[str, Any]:
         """
@@ -87,6 +88,7 @@ class MemoryStore:
         Args:
             query: The search query.
             agent_id: The agent ID to scope the search.
+            project_scoped: Whether to scope the search to the current project.
             limit: Maximum number of results to return.
 
         Returns:
@@ -96,16 +98,21 @@ class MemoryStore:
             query=query,
             user_id=self.user_id,
             agent_id=agent_id,
-            run_id=self.project_id,
+            run_id=self.project_id if project_scoped else None,
             limit=limit,
         )
 
-    async def get_all(self, agent_id: str) -> dict[str, Any]:
+    async def get_all(
+        self,
+        agent_id: str,
+        project_scoped: bool = True,
+    ) -> dict[str, Any]:
         """
         Get all memories for an agent.
 
         Args:
             agent_id: The agent ID to scope the query.
+            project_scoped: Whether to scope the search to the current project.
 
         Returns:
             Results dict with 'results' key.
@@ -113,13 +120,14 @@ class MemoryStore:
         return await self.store.get_all(
             user_id=self.user_id,
             agent_id=agent_id,
-            run_id=self.project_id,
+            run_id=self.project_id if project_scoped else None,
         )
 
     async def add(
         self,
         messages: list[dict[str, Any]],
         agent_id: str,
+        project_scoped: bool = True,
         infer: bool = True,
         prompt: str | None = None,
     ) -> dict[str, Any]:
@@ -129,6 +137,7 @@ class MemoryStore:
         Args:
             messages: List of message dicts with 'role' and 'content' keys.
             agent_id: The agent ID to scope the memory.
+            project_scoped: Whether to scope the search to the current project.
             infer: Whether to infer facts from the messages.
             prompt: Optional prompt to guide inference.
 
@@ -139,7 +148,7 @@ class MemoryStore:
             messages,
             user_id=self.user_id,
             agent_id=agent_id,
-            run_id=self.project_id,
+            run_id=self.project_id if project_scoped else None,
             infer=infer,
             prompt=prompt,
         )

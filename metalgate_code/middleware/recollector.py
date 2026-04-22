@@ -13,6 +13,7 @@ from metalgate_code.memory.config import (
     DEFAULT_EPISODIC_LIMIT,
     EPISODIC_AGENT_ID,
     SEMANTIC_AGENT_ID,
+    USER_AGENT_ID,
 )
 from metalgate_code.memory.store import MemoryStore
 
@@ -54,24 +55,20 @@ class RecollectorMiddleware(AgentMiddleware):
     async def _collect_memories(
         self,
         request: ModelRequest,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         """
-        Search both semantic and episodic memories in parallel.
+        Search user, semantic, episodic, and memories.
+        User and semantic memories are fetched once at session start.
+        Episodic memories are searched per-message.
 
         Args:
-            query: The search query (first user message).
-            user_id: The user identifier.
-            project: The project name.
+            request: The model request containing the query.
 
         Returns:
-            Tuple of (semantic_results, episodic_results).
+            Tuple of (user_results, semantic_results, episodic_results).
         """
         if self._memory is None:
-            return [], []
-
-        semantic_task = None
-        if self._is_first_message(request):
-            semantic_task = self._memory.get_all(agent_id=SEMANTIC_AGENT_ID)
+            return [], [], []
 
         episodic_task = self._memory.search(
             query=self._get_latest_message(request),
@@ -79,25 +76,40 @@ class RecollectorMiddleware(AgentMiddleware):
             limit=DEFAULT_EPISODIC_LIMIT,
         )
 
-        if semantic_task:
-            semantic, episodic = await asyncio.gather(
-                semantic_task, episodic_task, return_exceptions=False
+        if self._is_first_message(request):
+            user_task = self._memory.get_all(
+                agent_id=USER_AGENT_ID,
+                project_scoped=False,
+            )
+            semantic_task = self._memory.get_all(agent_id=SEMANTIC_AGENT_ID)
+            user, semantic, episodic = await asyncio.gather(
+                user_task,
+                semantic_task,
+                episodic_task,
+                return_exceptions=False,
             )
         else:
+            user = {}
             semantic = {}
             episodic = await episodic_task
 
-        for name, result in [("semantic", semantic), ("episodic", episodic)]:
+        for name, result in [
+            ("user", user),
+            ("semantic", semantic),
+            ("episodic", episodic),
+        ]:
             logger.info(f"{name}: type={type(result)}, value={result!r}")
 
         # Extract results from response dicts
-        semantic_results = semantic.get("results", [])
-        episodic_results = episodic.get("results", [])
+        user_results = user.get("results", []) if user else []
+        semantic_results = semantic.get("results", []) if semantic else []
+        episodic_results = episodic.get("results", []) if episodic else []
 
-        return semantic_results, episodic_results
+        return user_results, semantic_results, episodic_results
 
     def _format_memories(
         self,
+        user_results: list[dict[str, Any]],
         semantic_results: list[dict[str, Any]],
         episodic_results: list[dict[str, Any]],
     ) -> str:
@@ -105,16 +117,25 @@ class RecollectorMiddleware(AgentMiddleware):
         Format memory results for injection into system message.
 
         Args:
+            user_results: List of user memory results.
             semantic_results: List of semantic memory results.
             episodic_results: List of episodic memory results.
 
         Returns:
             Formatted memory context string.
         """
-        parts = ["## Relevant Context\n"]
+        parts = ["## Relevant memories\n"]
+
+        if user_results:
+            parts.append("### User")
+            for result in user_results:
+                memory_text = result.get("memory", "")
+                if memory_text:
+                    parts.append(f"- {memory_text}")
+            parts.append("")
 
         if semantic_results:
-            parts.append("### Memories")
+            parts.append("### Semantic")
             for result in semantic_results:
                 memory_text = result.get("memory", "")
                 if memory_text:
@@ -122,7 +143,7 @@ class RecollectorMiddleware(AgentMiddleware):
             parts.append("")
 
         if episodic_results:
-            parts.append("### Related Conversations")
+            parts.append("### Episodic")
             for result in episodic_results:
                 if (id := result.get("id")) not in self._injection_cache:
                     self._injection_cache.add(id)
@@ -140,14 +161,20 @@ class RecollectorMiddleware(AgentMiddleware):
         logger.debug(f"Searching memories for request: {request}")
 
         # Search memories
-        semantic_results, episodic_results = await self._collect_memories(request)
+        user_results, semantic_results, episodic_results = await self._collect_memories(
+            request
+        )
 
         # If no memories found, skip injection
-        if not semantic_results and not episodic_results:
+        if not user_results and not semantic_results and not episodic_results:
             return await handler(request)
 
         # Format and inject context into system message
-        context = self._format_memories(semantic_results, episodic_results)
+        context = self._format_memories(
+            user_results,
+            semantic_results,
+            episodic_results,
+        )
 
         # Build new system message with context prepended
         existing_system_message = request.system_message or SystemMessage(content="")

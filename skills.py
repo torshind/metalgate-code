@@ -116,7 +116,7 @@ def compile_c(target: str) -> Tuple[int, str]:
 def run_python(project_path: str, target: str) -> Tuple[int, str]:
     """Run a python command using the correct project environment.
     project_path = path to the project root.
-    target = python command to run.
+    target = python command arguments.
     Returns a tuple of (returncode, output)."""
     return _run(f"uv run --project {project_path} python {target}")
 
@@ -127,7 +127,7 @@ def run_pytest(project_path: str, target: str) -> Tuple[int, str]:
     project_path = path to the project root.
     target = optional path (file or directory).
     Returns a tuple of (returncode, output)."""
-    return _run(f"uv run --project {project_path} pytest {target} -v --tb=short")
+    return _run(f"uv run --project {project_path} pytest -v --tb=short {target}")
 
 
 @tool
@@ -159,6 +159,6 @@ def list_all_files(path: str) -> Tuple[int, str]:
 def run_ty(project_path: str, ty_args: str) -> Tuple[int, str]:
     """Run ty (type checking) with arguments.
     project_path = path to the project root.
-    ty_args = arguments to pass to ty.
+    ty_args = ty command arguments.
     Returns a tuple of (returncode, output)."""
     return _run(f"uv run --project {project_path} ty {ty_args}")

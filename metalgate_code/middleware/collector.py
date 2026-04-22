@@ -20,6 +20,8 @@ from metalgate_code.memory import (
     EPISODIC_INSTRUCTIONS,
     SEMANTIC_AGENT_ID,
     SEMANTIC_INSTRUCTIONS,
+    USER_AGENT_ID,
+    USER_INSTRUCTIONS,
 )
 from metalgate_code.memory.store import MemoryStore
 
@@ -30,9 +32,10 @@ class CollectorMiddleware(AgentMiddleware):
     """
     Middleware that stores session summaries to Mem0 at session end.
 
-    Writes to two memory scopes:
-    - Semantic: General facts, conventions, preferences (Mem0 extracts facts)
-    - Episodic: Session summaries and specific experiences
+    Writes to memory scopes:
+        - User: General facts
+        - Semantic: Project scoped facts, conventions, preferences
+        - Episodic: Session specific experiences
     """
 
     def __init__(
@@ -107,7 +110,7 @@ class CollectorMiddleware(AgentMiddleware):
         request: ModelRequest,
     ) -> None:
         """
-        Store memories to both semantic and episodic scopes.
+        Store memories.
 
         Args:
             request: ModelRequest containing messages and state.
@@ -124,6 +127,18 @@ class CollectorMiddleware(AgentMiddleware):
 
         message_dicts = self._convert_messages(new_messages)
         logger.info(f"Storing {len(message_dicts)} messages")
+
+        # Store to user scope (cross-project memories)
+        try:
+            await self._memory.add(
+                messages=message_dicts,
+                agent_id=USER_AGENT_ID,
+                project_scoped=False,
+                prompt=USER_INSTRUCTIONS,
+            )
+        except Exception as e:
+            # Log but don't fail the session
+            logger.error(f"Failed to store user memory: {e}")
 
         # Store to semantic scope with inference
         try:
