@@ -50,14 +50,16 @@ export MEMORY=true  # or "1", "yes", "on", "enabled"
 
 ### How Memory Works
 
-When enabled, the agent uses a two-tier memory system:
+When enabled, the agent uses a three-tier memory system:
 
 1. **Collector** — At the end of each turn, saves conversation summaries to memory in the background
+   - **User memories**: Facts that apply universally across ALL projects and sessions — user identity, stable personal preferences, and cross-project conventions
    - **Semantic memories**: Facts, architectural decisions, and conventions extracted from conversations
    - **Episodic memories**: Session summaries with concrete outcomes, problems encountered, and resolutions
 
 2. **Recollector** — Retrieves relevant memories and injects them into the system prompt
-   - **Semantic memories**: Loaded once at session start (facts, preferences, conventions)
+   - **User memories**: Loaded once at session start (cross-project preferences, identity)
+   - **Semantic memories**: Loaded once at session start (project-specific facts, conventions)
    - **Episodic memories**: Searched on every prompt for semantically relevant past sessions
 
 ### Memory Scopes

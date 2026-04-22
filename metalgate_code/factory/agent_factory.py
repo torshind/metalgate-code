@@ -124,10 +124,11 @@ def _build_agent(
     memory = None
     if _is_memory_enabled():
         try:
-            memory = MemoryStore(cwd=cwd, user_id=_get_userid())
-            logger.info("Memory enabled for project: %s", cwd)
+            user_id = _get_userid()
+            memory = MemoryStore(cwd=cwd, user_id=user_id)
+            logger.info(f"Memory enabled for project: {cwd}, user_id: {user_id}")
         except Exception as e:
-            logger.warning("Failed to initialize memory: %s", e)
+            logger.warning(f"Failed to initialize memory: {e}")
 
     return create_deep_agent(
         # Falls back to Deep Agent default model if not provided
