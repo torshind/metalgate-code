@@ -66,16 +66,20 @@ def create_tool_skill(
         return f"SyntaxError: {e}"
 
     funcs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
-    if len(funcs) != 1 or funcs[0].name != name:
-        return f"Error: code must define exactly one function named '{name}'"
-    if "tool" not in [ast.unparse(d) for d in funcs[0].decorator_list]:
-        return "Error: function must be decorated with @tool"
-    if not (
-        funcs[0].body
-        and isinstance(funcs[0].body[0], ast.Expr)
-        and isinstance(funcs[0].body[0].value, ast.Constant)
-    ):
-        return "Error: function must have a docstring"
+    tool_funcs = [
+        f
+        for f in funcs
+        if any(
+            (isinstance(d, ast.Name) and d.id == "tool")
+            or (isinstance(d, ast.Attribute) and d.attr == "tool")
+            for d in f.decorator_list
+        )
+    ]
+    if not tool_funcs:
+        return "Error: code must define at least one function decorated with @tool"
+    for f in tool_funcs:
+        if not ast.get_docstring(f):
+            return f"Error: @tool function '{f.name}' must have a docstring"
 
     # 3. Check for duplicate function name
     skills_path = registry.skills_path
