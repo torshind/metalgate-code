@@ -9,14 +9,14 @@ resolution-markers = [
 
 [[package]]
 name = "agent-client-protocol"
-version = "0.8.1"
+version = "0.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1b/7b/7cdac86db388809d9e3bc58cac88cc7dfa49b7615b98fab304a828cd7f8a/agent_client_protocol-0.8.1.tar.gz", hash = "sha256:1bbf15663bf51f64942597f638e32a6284c5da918055d9672d3510e965143dbd", size = 68866, upload-time = "2026-02-13T15:34:54.567Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/eb/13/3b893421369767e7043cc115d6ef0df417c298b84563be3a12df0416158d/agent_client_protocol-0.9.0.tar.gz", hash = "sha256:f744c48ab9af0f0b4452e5ab5498d61bcab97c26dbe7d6feec5fd36de49be30b", size = 71853, upload-time = "2026-03-26T01:21:00.379Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4b/f3/219eeca0ad4a20843d4b9eaac5532f87018b9d25730a62a16f54f6c52d1a/agent_client_protocol-0.8.1-py3-none-any.whl", hash = "sha256:9421a11fd435b4831660272d169c3812d553bb7247049c138c3ca127e4b8af8e", size = 54529, upload-time = "2026-02-13T15:34:53.344Z" },
+    { url = "https://files.pythonhosted.org/packages/8f/ed/c284543c08aa443a4ef2c8bd120be51da8433dd174c01749b5d87c333f22/agent_client_protocol-0.9.0-py3-none-any.whl", hash = "sha256:06911500b51d8cb69112544e2be01fc5e7db39ef88fecbc3848c5c6f194798ee", size = 56850, upload-time = "2026-03-26T01:20:59.252Z" },
 ]
 
 [[package]]
@@ -608,7 +608,7 @@ wheels = [
 
 [[package]]
 name = "deepagents"
-version = "0.5.2"
+version = "0.5.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "langchain" },
@@ -618,28 +618,28 @@ dependencies = [
     { name = "langsmith" },
     { name = "wcmatch" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/92/33/6d4306ebd47a3adce30b49807e3a338f72eeb2d6f44f28ad67458cd9736a/deepagents-0.5.2.tar.gz", hash = "sha256:7e942017b5d6a923deb111bc0ff097d07c0b20b64fd96818561d00a8259525d0", size = 121705, upload-time = "2026-04-10T20:39:48.642Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bd/c5/fbf36ff707f7ad4ff2d1590ba8c3b44622370955c74f0c84e4bb1b101d7d/deepagents-0.5.3.tar.gz", hash = "sha256:cbe63bd482c37d3aef883326f5dde70effcd489e67fc91834ffe7a8769796a5f", size = 122654, upload-time = "2026-04-15T13:06:34.875Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/db/3a/fb70ab92f86c952f5666ea5f423432888f9e83bb37c2338e6782a308d98c/deepagents-0.5.2-py3-none-any.whl", hash = "sha256:48da8e85bac79c2d4ddf859c6a3aea75d0e642ac55f9efe07492338c8b8d3d94", size = 137658, upload-time = "2026-04-10T20:39:47.443Z" },
+    { url = "https://files.pythonhosted.org/packages/30/8f/40c91a29e4f094e5a1375e33309a3d0ca2e5204816d1dcdcd41ac38410d8/deepagents-0.5.3-py3-none-any.whl", hash = "sha256:f1f1c968f17a5bfb0a6d588d00c2e83264cdac0faa91f7b522892d5a2bd303cb", size = 138475, upload-time = "2026-04-15T13:06:33.593Z" },
 ]
 
 [[package]]
 name = "deepagents-acp"
-version = "0.0.5"
+version = "0.0.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "deepagents" },
     { name = "python-dotenv" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2b/5e/5690a3cabf3fed5c9e4251c38c0a9e8ed32dfb426fbcdf5d31194aa2ca38/deepagents_acp-0.0.5.tar.gz", hash = "sha256:74e3dedada0961798175c668322fc6fedce2a0d8828ffe221df8b26e68d7292a", size = 13005074, upload-time = "2026-04-07T17:31:10.61Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e1/61/287e0b55650d6c7795419414cbf07ea7fa8a7c0fdfcfee4639e8d792cd30/deepagents_acp-0.0.6.tar.gz", hash = "sha256:42f7c324281893563496741579db0818ec8bfd7bfc2e03d0f18cacd5a7b27dbb", size = 13009937, upload-time = "2026-04-18T01:06:30.721Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/51/64/11da85aaeda8778e4d5a0717c4d20acb5f3bfb86a05386a33a19c8da75ce/deepagents_acp-0.0.5-py3-none-any.whl", hash = "sha256:4d4a8a2786e50c4307fd9138d876336c75a296f76df21fe9ea51e4a50760b9c4", size = 16985, upload-time = "2026-04-07T17:31:09.565Z" },
+    { url = "https://files.pythonhosted.org/packages/85/b3/9882519785e3783db9b0e2fbc488b39d561b47a64a11bab55d537cfd24bb/deepagents_acp-0.0.6-py3-none-any.whl", hash = "sha256:b359cbaade27dd555dd7c70f959a8766ea215f41082bd19bfc39fdda558c0ed3", size = 17512, upload-time = "2026-04-18T01:06:29.142Z" },
 ]
 
 [[package]]
 name = "deepagents-cli"
-version = "0.0.37"
+version = "0.0.41"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiosqlite" },
@@ -672,9 +672,9 @@ dependencies = [
     { name = "tomli-w" },
     { name = "uuid-utils" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d6/09/e764fa1371492278499ca36b00efd1dadac95e7c2395c86c52cf2d30656f/deepagents_cli-0.0.37.tar.gz", hash = "sha256:c2296a403de056a77d121952abde116a5a1eafe72bef5fba0669f0f66bac2baa", size = 1148386, upload-time = "2026-04-10T20:46:55.381Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/08/73/ab8dee2448fdf8bd619713c01664e2d954c0d48781e1f506ef300779d87c/deepagents_cli-0.0.41.tar.gz", hash = "sha256:9737d141ab5b6d183a46de7276a799fed079bb2274ed6b23acbb1c5b1a5f665a", size = 1253570, upload-time = "2026-04-21T17:08:04.959Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/01/43/63da468b5ff0a7eab655908c85ac9ec50e7dff6d79c260e171159229723e/deepagents_cli-0.0.37-py3-none-any.whl", hash = "sha256:d66ca0d260f70972cdadcca1162317a16289700e285dea700b56650602d415f8", size = 423810, upload-time = "2026-04-10T20:46:53.782Z" },
+    { url = "https://files.pythonhosted.org/packages/59/96/7d1efd2c1afca4674cf364ae0cbc310f206cdc51747a4f1e6b2eb5d0e6aa/deepagents_cli-0.0.41-py3-none-any.whl", hash = "sha256:e4d4fe0461e189a2376dec7a8ba4f088c6c988fa293dff9af8ae708aab190dbb", size = 481560, upload-time = "2026-04-21T17:08:03.309Z" },
 ]
 
 [[package]]
@@ -1699,7 +1699,7 @@ wheels = [
 
 [[package]]
 name = "langsmith"
-version = "0.7.30"
+version = "0.7.35"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -1712,9 +1712,9 @@ dependencies = [
     { name = "xxhash" },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/46/e7/d27d952ce9824d684a3bb500a06541a2d55734bc4d849cdfcca2dfd4d93a/langsmith-0.7.30.tar.gz", hash = "sha256:d9df7ba5e42f818b63bda78776c8f2fc853388be3ae77b117e5d183a149321a2", size = 1106040, upload-time = "2026-04-09T21:12:01.892Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b2/c2/94611791544b9a74f4d322ac9727343b93aa3f4167e6f5addf80e64a5b67/langsmith-0.7.35.tar.gz", hash = "sha256:78ce99a79e7ec4d3b6e3b324fe4378158b5980a64a819aea96a5b11a9af1468e", size = 4400038, upload-time = "2026-04-24T01:25:43.965Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/37/19/96250cf58070c5563446651b03bb76c2eb5afbf08e754840ab639532d8c6/langsmith-0.7.30-py3-none-any.whl", hash = "sha256:43dd9f8d290e4d406606d6cc0bd62f5d1050963f05fe0ab6ffe50acf41f2f55a", size = 372682, upload-time = "2026-04-09T21:12:00.481Z" },
+    { url = "https://files.pythonhosted.org/packages/cc/f5/2741f443fd0400a2383df6a0b5c129442b7864c3504f8641bff109ffefd3/langsmith-0.7.35-py3-none-any.whl", hash = "sha256:335738789f324a1854a38c88432696ca97cae6f2f07dadd8db1383b3a6141c19", size = 380830, upload-time = "2026-04-24T01:25:42.243Z" },
 ]
 
 [package.optional-dependencies]
@@ -1875,11 +1875,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agent-client-protocol", specifier = "==0.8.1" },
+    { name = "agent-client-protocol", specifier = "==0.9.0" },
     { name = "chromadb", specifier = ">=0.5.0" },
-    { name = "deepagents", specifier = "==0.5.2" },
-    { name = "deepagents-acp", specifier = "==0.0.5" },
-    { name = "deepagents-cli", specifier = "==0.0.37" },
+    { name = "deepagents", specifier = "==0.5.3" },
+    { name = "deepagents-acp", specifier = "==0.0.6" },
+    { name = "deepagents-cli", specifier = "==0.0.41" },
     { name = "isort", specifier = ">=8.0.0" },
     { name = "langchain-community", specifier = ">=0.4.0" },
     { name = "langchain-mcp-adapters", specifier = ">=0.2.0" },

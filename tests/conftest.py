@@ -19,8 +19,8 @@ from acp.schema import (
     CreateTerminalRequest,
     CreateTerminalResponse,
     DeniedOutcome,
-    KillTerminalCommandRequest,
-    KillTerminalCommandResponse,
+    KillTerminalRequest,
+    KillTerminalResponse,
     ReadTextFileRequest,
     ReadTextFileResponse,
     ReleaseTerminalRequest,
@@ -144,9 +144,9 @@ class RecordingClient(Client):
     async def wait_for_terminal_exit(self, session_id, terminal_id, **kwargs):
         return WaitForTerminalExitResponse()
 
-    @param_model(KillTerminalCommandRequest)
+    @param_model(KillTerminalRequest)
     async def kill_terminal(self, session_id, terminal_id, **kwargs):
-        return KillTerminalCommandResponse()
+        return KillTerminalResponse()
 
     async def ext_method(self, method, params):
         return {}
