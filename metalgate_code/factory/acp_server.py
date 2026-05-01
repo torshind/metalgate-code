@@ -324,6 +324,7 @@ class MetalGateACP(AgentServerACP):
             | EmbeddedResourceContentBlock
         ],
         session_id: str,
+        message_id: str | None = None,
         **kwargs: Any,
     ) -> PromptResponse:
         """Process a user prompt with AsyncSqliteSaver checkpointer."""
@@ -352,7 +353,7 @@ class MetalGateACP(AgentServerACP):
         async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
             self._agent.checkpointer = checkpointer
 
-            result = await super().prompt(prompt, session_id, **kwargs)
+            result = await super().prompt(prompt, session_id, message_id, **kwargs)
 
         # Note: checkpointer is closed when exiting the context
         self._agent.checkpointer = None

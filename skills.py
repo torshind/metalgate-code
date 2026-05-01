@@ -74,8 +74,8 @@ def tavily_crawl(
 
 
 @tool
-def serper_search(query: str, num: int = 10) -> dict:
-    """Search Google using Serper API.
+def web_search(query: str, num: int = 10) -> dict:
+    """Search the web using Serper API.
     query = the search query string.
     num = number of results to return (default 10, max 100).
     Returns a dict with search results."""
@@ -113,32 +113,30 @@ def compile_c(target: str) -> Tuple[int, str]:
 
 
 @tool
-def run_python(project_path: str, target: str) -> Tuple[int, str]:
+def run_python(cwd: str, target: str) -> Tuple[int, str]:
     """Run a python command using the correct project environment.
-    project_path = path to the project root.
+    cwd = path to the project root.
     target = python command arguments.
     Returns a tuple of (returncode, output)."""
-    return _run(f"uv run --project {project_path} python {target}")
+    return _run(f"uv run --directory {cwd} python {target}")
 
 
 @tool
-def run_pytest(project_path: str, target: str) -> Tuple[int, str]:
+def run_pytest(cwd: str, target: str) -> Tuple[int, str]:
     """Run unit tests with pytest using the correct project environment.
-    project_path = path to the project root.
+    cwd = path to the project root.
     target = optional path (file or directory).
     Returns a tuple of (returncode, output)."""
-    return _run(f"uv run --project {project_path} pytest -v --tb=short {target}")
+    return _run(f"uv run --directory {cwd} pytest -v --tb=short {target}")
 
 
 @tool
-def run_pytest_verbose(project_path: str, target: str) -> Tuple[int, str]:
+def run_pytest_verbose(cwd: str, target: str) -> Tuple[int, str]:
     """Run unit tests with pytest with verbose output, using the correct project environment.
-    project_path = path to the project root.
+    cwd = path to the project root.
     target = optional path (file or directory).
     Returns a tuple of (returncode, output)."""
-    return _run(
-        f"uv run --project {project_path} pytest -v -s --log-cli-level=INFO {target}"
-    )
+    return _run(f"uv run --directory {cwd} pytest -v -s --log-cli-level=INFO {target}")
 
 
 @tool
@@ -156,9 +154,9 @@ def list_all_files(path: str) -> Tuple[int, str]:
 
 
 @tool
-def run_ty(project_path: str, ty_args: str) -> Tuple[int, str]:
+def run_ty(cwd: str, ty_args: str) -> Tuple[int, str]:
     """Run ty (type checking) with arguments.
-    project_path = path to the project root.
+    cwd = path to the project root.
     ty_args = ty command arguments.
     Returns a tuple of (returncode, output)."""
-    return _run(f"uv run --project {project_path} ty {ty_args}")
+    return _run(f"uv run --directory {cwd} ty check {ty_args}")
