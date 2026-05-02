@@ -7,7 +7,12 @@ import os
 from functools import partial
 
 from deepagents import create_deep_agent
-from deepagents.backends import CompositeBackend, LocalShellBackend, StateBackend
+from deepagents.backends import (
+    BackendProtocol,
+    CompositeBackend,
+    LocalShellBackend,
+    StateBackend,
+)
 from deepagents_acp.server import AgentSessionContext
 from deepagents_cli.local_context import LocalContextMiddleware
 from langgraph.graph.state import CompiledStateGraph
@@ -57,6 +62,7 @@ META_SKILLS = [
 
 def _build_agent(
     context: AgentSessionContext,
+    backend: BackendProtocol | None = None,
 ) -> CompiledStateGraph:
     """Agent factory based on the given root directory."""
     logger.info("Model: %s", context.model)
@@ -84,21 +90,22 @@ def _build_agent(
     ephemeral_backend = StateBackend()
     shell_env = os.environ.copy()
 
-    # Use LocalShellBackend for filesystem + shell execution.
-    # Provides `execute` tool via FilesystemMiddleware with per-command
-    # timeout support.
-    shell_backend = LocalShellBackend(
-        root_dir=cwd,
-        inherit_env=True,
-        env=shell_env,
-    )
-    backend = CompositeBackend(
-        default=shell_backend,
-        routes={
-            "/memories/": ephemeral_backend,
-            "/conversation_history/": ephemeral_backend,
-        },
-    )
+    if not backend:
+        # Use LocalShellBackend for filesystem + shell execution.
+        # Provides `execute` tool via FilesystemMiddleware with per-command
+        # timeout support.
+        shell_backend = LocalShellBackend(
+            root_dir=cwd,
+            inherit_env=True,
+            env=shell_env,
+        )
+        backend = CompositeBackend(
+            default=shell_backend,
+            routes={
+                "/memories/": ephemeral_backend,
+                "/conversation_history/": ephemeral_backend,
+            },
+        )
 
     model = create_chat_model(context.model)
 
@@ -113,7 +120,7 @@ def _build_agent(
         "\n"
         "## Tool Usage"
         "\n"
-        "CRITICAL: Before using `execute`, check if a project-specific tool skill applies. "
+        "CRITICAL: Before using `execute`, check if an available tool skill applies. "
         "If a tool skill exists for the operation, use it instead of `execute`. "
         "Tool skills are optimized for this project and handle environment/configuration automatically."
     )
@@ -136,7 +143,7 @@ def _build_agent(
         backend=backend,
         interrupt_on=interrupt_config,
         middleware=[
-            LocalContextMiddleware(backend=backend),
+            LocalContextMiddleware(backend=backend),  # type: ignore
             RecollectorMiddleware(memory=memory),
             ToolSkillsMiddleware(),
             DynamicToolsMiddleware(),
