@@ -28,22 +28,25 @@ def get_mem0_config() -> dict[str, Any]:
         Dictionary with llm and embedder configuration for Mem0.
     """
     api_key = os.environ.get("OPENAI_API_KEY", "")
-    embedding_model = os.environ.get("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-8B")
+    mem_model = os.environ.get("MEM_MODEL", "moonshotai/Kimi-K2.6")
+    temperature = os.environ.get("TEMPERATURE", 0.6)
+    embedder_model = os.environ.get("MEM_EMBEDDER_MODEL", "Qwen/Qwen3-Embedding-8B")
 
     config: dict[str, Any] = {
         "llm": {
             "provider": "openai",
             "config": {
                 "api_key": api_key,
-                "model": "moonshotai/Kimi-K2.5",
+                "model": mem_model,
                 "openai_base_url": EVROC_BASE_URL,
+                "temperature": temperature,
             },
         },
         "embedder": {
             "provider": "openai",
             "config": {
                 "api_key": api_key,
-                "model": embedding_model,
+                "model": embedder_model,
                 "openai_base_url": EVROC_BASE_URL,
             },
         },
@@ -87,17 +90,18 @@ def fetch_models() -> list[dict[str, str]]:
 
 
 @no_type_check
-def create_chat_model(model_id: str = "evroc:moonshotai/Kimi-K2.5") -> ChatOpenAI:
+def create_chat_model(model_id: str = "evroc:moonshotai/Kimi-K2.6") -> ChatOpenAI:
     """
     Create a LangChain ChatOpenAI instance for Evroc models.
 
     Args:
-        model_id: Model identifier with 'evroc:' prefix. Defaults to 'evroc:moonshotai/Kimi-K2.5'.
+        model_id: Model identifier with 'evroc:' prefix. Defaults to 'evroc:moonshotai/Kimi-K2.6'.
 
     Returns:
         Configured ChatOpenAI instance for the Evroc API.
     """
     api_key = os.environ.get("OPENAI_API_KEY", "")
+    temperature = os.environ.get("TEMPERATURE", 0.6)
 
     # Strip 'evroc:' prefix if present
     model_name = model_id.split(":", 1)[1] if ":" in model_id else model_id
@@ -106,4 +110,5 @@ def create_chat_model(model_id: str = "evroc:moonshotai/Kimi-K2.5") -> ChatOpenA
         model=model_name,
         base_url=EVROC_BASE_URL,
         api_key=SecretStr(api_key) if api_key else None,
+        temperature=temperature,
     )

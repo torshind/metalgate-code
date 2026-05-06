@@ -147,7 +147,7 @@ mcpServers:
          "type": "custom",
          "command": "/path/to/metalgate-code/run.sh",
          "default_config_options": {
-           "model": "evroc:moonshotai/Kimi-K2.5"
+           "model": "evroc:moonshotai/Kimi-K2.6"
          }
        }
      }
@@ -160,7 +160,7 @@ mcpServers:
 
 | Component | Tested | Notes |
 |-----------|--------|-------|
-| **LLM Provider** | [evroc](https://www.evroc.com) | Only tested provider. `moonshotai/Kimi-K2.5` model recommended. |
+| **LLM Provider** | [evroc](https://www.evroc.com) | Only tested provider. `moonshotai/Kimi-K2.6` model recommended. |
 | **Editor** | [Zed](https://zed.dev) | Only tested editor. |
 
 Other providers and editors may work but are untested. Testers and PRs are welcome!

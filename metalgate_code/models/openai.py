@@ -16,9 +16,6 @@ logger = logging.getLogger("metalgate_code")
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 OPENAI_MODELS_ENDPOINT = f"{OPENAI_BASE_URL}/models"
 
-# Default embedding model for Mem0
-DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
-
 
 def get_mem0_config() -> dict[str, Any]:
     """
@@ -28,16 +25,22 @@ def get_mem0_config() -> dict[str, Any]:
         Dictionary with llm and embedder configuration for Mem0.
     """
     api_key = os.environ.get("OPENAI_API_KEY", "")
-    embedding_model = os.environ.get("EMBEDDINGS", DEFAULT_EMBEDDING_MODEL)
+    mem_model = os.environ.get("MEM_MODEL", "gpt-4.1-nano")
+    temperature = os.environ.get("TEMPERATURE", 0.7)
+    embedder_model = os.environ.get("MEM_EMBEDDER_MODEL", "text-embedding-3-small")
 
     config: dict[str, Any] = {
         "llm": {
             "provider": "openai",
-            "config": {"api_key": api_key, "model": "gpt-4.1-nano"},
+            "config": {
+                "api_key": api_key,
+                "model": mem_model,
+                "temperature": temperature,
+            },
         },
         "embedder": {
             "provider": "openai",
-            "config": {"api_key": api_key, "model": embedding_model},
+            "config": {"api_key": api_key, "model": embedder_model},
         },
     }
     return config
@@ -88,28 +91,26 @@ def fetch_models() -> list[dict[str, str]]:
 @no_type_check
 def create_chat_model(
     model_id: str = "openai:gpt-4o",
-    temperature: float = 0.7,
-    max_tokens: int | None = None,
 ) -> ChatOpenAI:
     """
     Create a LangChain ChatOpenAI instance.
 
     Args:
         model_id: Model identifier with 'openai:' prefix. Defaults to 'openai:gpt-4o'.
-        temperature: Sampling temperature. Defaults to 0.7.
-        max_tokens: Maximum tokens to generate. Defaults to None.
 
     Returns:
         Configured ChatOpenAI instance.
     """
     api_key = os.environ.get("OPENAI_API_KEY", "")
+    temperature = os.environ.get("TEMPERATURE", 0.7)
+    max_tokens = os.environ.get("MAX_TOKENS", None)
 
     # Strip 'openai:' prefix if present
     model_name = model_id.split(":", 1)[1] if ":" in model_id else model_id
 
     return ChatOpenAI(
         model=model_name,
+        openai_api_key=SecretStr(api_key) if api_key else None,
         temperature=temperature,
         max_tokens=max_tokens,
-        openai_api_key=SecretStr(api_key) if api_key else None,
     )

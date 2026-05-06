@@ -27,18 +27,24 @@ def get_mem0_config() -> dict[str, Any]:
     Returns:
         Dictionary with llm and embedder configuration for Mem0.
     """
-    anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    openai_api_key = os.environ.get("OPENAI_API_KEY", "")
-    embedding_model = os.environ.get("EMBEDDINGS", "text-embedding-3-small")
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    embedder_api_key = os.environ.get("EMBEDDER_API_KEY", "")
+    mem_model = os.environ.get("MEM_MODEL", "claude-3-5-haiku-20241022")
+    temperature = os.environ.get("TEMPERATURE", 0.7)
+    embedder_model = os.environ.get("MEM_EMBEDDER_MODEL", "voyage-3.5-lite")
 
     config: dict[str, Any] = {
         "llm": {
             "provider": "anthropic",
-            "config": {"api_key": anthropic_api_key, "model": "claude-3-5-haiku-20241022"},
+            "config": {
+                "api_key": api_key,
+                "model": mem_model,
+                "temperature": temperature,
+            },
         },
         "embedder": {
             "provider": "openai",
-            "config": {"api_key": openai_api_key, "model": embedding_model},
+            "config": {"api_key": embedder_api_key, "model": embedder_model},
         },
     }
     return config
@@ -92,8 +98,6 @@ def fetch_models() -> list[dict[str, str]]:
 @no_type_check
 def create_chat_model(
     model_id: str = "anthropic:claude-3-5-sonnet-20241022",
-    temperature: float = 0.7,
-    max_tokens: int | None = None,
 ) -> ChatAnthropic:
     """
     Create a LangChain ChatAnthropic instance.
@@ -101,20 +105,20 @@ def create_chat_model(
     Args:
         model_id: Model identifier with 'anthropic:' prefix.
                   Defaults to 'anthropic:claude-3-5-sonnet-20241022'.
-        temperature: Sampling temperature. Defaults to 0.7.
-        max_tokens: Maximum tokens to generate. Defaults to None (provider default).
 
     Returns:
         Configured ChatAnthropic instance.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    temperature = os.environ.get("TEMPERATURE", 0.7)
+    max_tokens = os.environ.get("MAX_TOKENS", None)
 
     # Strip 'anthropic:' prefix if present
     model_name = model_id.split(":", 1)[1] if ":" in model_id else model_id
 
     return ChatAnthropic(
         model=model_name,
+        anthropic_api_key=SecretStr(api_key) if api_key else None,
         temperature=temperature,
         max_tokens=max_tokens,
-        anthropic_api_key=SecretStr(api_key) if api_key else None,
     )
