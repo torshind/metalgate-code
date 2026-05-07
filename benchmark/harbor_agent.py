@@ -39,7 +39,7 @@ class HarborAgent(BaseAgent):
             cwd = cwd.strip()
         await environment.upload_file(
             source_path=Path("benchmark/skills.py"),
-            target_path=f"{cwd}/skills.py",
+            target_path=f"{cwd}/.metalgate/skills.py`",
         )
 
         session_context = AgentSessionContext(

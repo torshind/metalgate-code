@@ -89,4 +89,4 @@ def run_ty(cwd: str, ty_args: str) -> Tuple[int, str]:
     cwd = path to the project root.
     ty_args = ty command arguments.
     Returns a tuple of (returncode, output)."""
-    return _run(f"uv run --directory {cwd} ty check {ty_args}")
+    return _run(f"ty check {ty_args}")
