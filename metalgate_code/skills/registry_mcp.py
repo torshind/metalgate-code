@@ -115,7 +115,7 @@ class RegistryMCP(MultiServerMCPClient):
 
     def load(self, project_path: str | Path):
         """Initialize the registry by loading config and connecting to servers."""
-        self._config_path = Path(project_path) / "mcp.yaml"
+        self._config_path = Path(project_path) / ".metalgate" / "mcp.yaml"
         if self._config_path.exists():
             logger.info(f"Loading MCP tools from {self._config_path}")
             self.reload()

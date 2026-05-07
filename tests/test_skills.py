@@ -39,7 +39,9 @@ def list_all_files(path: str) -> Tuple[int, str]:
     Returns a tuple of (returncode, output)."""
     return _run(f"ls -al {path}")
 '''
-    skills_path = client.temp_dir / "skills.py"
+    metalgate_dir = client.temp_dir / ".metalgate"
+    metalgate_dir.mkdir(exist_ok=True)
+    skills_path = metalgate_dir / "skills.py"
     skills_path.write_text(test_skill_code)
 
     await run_agent(
@@ -71,7 +73,9 @@ async def test_agent_reload_skills(run_sh: Path, tmp_path: Path) -> None:
     from acp import spawn_agent_process, text_block
 
     client = RecordingClient(prefix="acp_skills_test_")
-    skills_path = client.temp_dir / "skills.py"
+    metalgate_dir = client.temp_dir / ".metalgate"
+    metalgate_dir.mkdir(exist_ok=True)
+    skills_path = metalgate_dir / "skills.py"
 
     # Start with an empty skills.py file
     skills_path.write_text("")
@@ -149,7 +153,9 @@ from langchain_core.tools import tool
 
 
 """
-    skills_path = client.temp_dir / "skills.py"
+    metalgate_dir = client.temp_dir / ".metalgate"
+    metalgate_dir.mkdir(exist_ok=True)
+    skills_path = metalgate_dir / "skills.py"
     skills_path.write_text(test_skill_code)
 
     await run_agent(

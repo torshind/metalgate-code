@@ -5,6 +5,7 @@ Agent factory for creating Deep Agent instances based on session context.
 import logging
 import os
 from functools import partial
+from pathlib import Path
 
 from deepagents import create_deep_agent
 from deepagents.backends import (
@@ -78,7 +79,7 @@ def _build_agent(
     interrupt_config = get_interrupt_config(context.mode)
 
     # Load AGENTS.md if it exists and add to system prompt
-    agents_md_path = os.path.join(cwd, "AGENTS.md")
+    agents_md_path = Path(cwd) / ".metalgate" / "AGENTS.md"
     agents_md_content = ""
     if os.path.isfile(agents_md_path):
         try:

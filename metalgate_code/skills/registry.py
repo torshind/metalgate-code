@@ -16,8 +16,8 @@ class SkillRegistry:
         self._skills_path: Path | None = None
 
     def load(self, project_path: str | Path):
-        """Load project skills if a skills.py exists. No-op otherwise."""
-        self._skills_path = Path(project_path) / "skills.py"
+        """Load project skills if a .metalgate/skills.py exists. No-op otherwise."""
+        self._skills_path = Path(project_path) / ".metalgate" / "skills.py"
         if self._skills_path.exists():
             logger.info(f"Loading skills from {self._skills_path}")
             self.reload()
