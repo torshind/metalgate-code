@@ -60,7 +60,7 @@ def create_chat_model(model_id: str | None = None) -> BaseChatModel:
     provider = get_provider()
 
     if provider == "evroc":
-        default_model = "evroc:moonshotai/Kimi-K2.6"
+        default_model = "evroc:moonshotai/Kimi-K2.5"
         return create_evroc_model(model_id or default_model)
     elif provider == "openai":
         default_model = "openai:gpt-4o"

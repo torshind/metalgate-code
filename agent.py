@@ -30,7 +30,7 @@ async def _serve_agent() -> None:
     load_dotenv(find_dotenv(".env", usecwd=True), override=True)
 
     logger.info("Environment loaded")
-    logger.info("API Key: %s", "ok" if os.environ.get("OPENAI_API_KEY") else "not set")
+    logger.info("API Key: %s", "ok" if os.environ.get("MODEL_API_KEY") else "not set")
 
     modes = get_available_modes()
 

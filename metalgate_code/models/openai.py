@@ -24,7 +24,8 @@ def get_mem0_config() -> dict[str, Any]:
     Returns:
         Dictionary with llm and embedder configuration for Mem0.
     """
-    api_key = os.environ.get("OPENAI_API_KEY", "")
+    api_key = os.environ.get("MODEL_API_KEY", "")
+    embedder_api_key = os.environ.get("EMBEDDER_API_KEY", "")
     mem_model = os.environ.get("MEM_MODEL", "gpt-4.1-nano")
     temperature = os.environ.get("TEMPERATURE", 0.7)
     embedder_model = os.environ.get("MEM_EMBEDDER_MODEL", "text-embedding-3-small")
@@ -40,7 +41,10 @@ def get_mem0_config() -> dict[str, Any]:
         },
         "embedder": {
             "provider": "openai",
-            "config": {"api_key": api_key, "model": embedder_model},
+            "config": {
+                "api_key": embedder_api_key,
+                "model": embedder_model,
+            },
         },
     }
     return config
@@ -55,7 +59,7 @@ def fetch_models() -> list[dict[str, str]]:
         Returns empty list if the fetch fails.
     """
     try:
-        api_key = os.environ.get("OPENAI_API_KEY", "")
+        api_key = os.environ.get("MODEL_API_KEY", "")
         if not api_key:
             logger.warning("No API key found for OpenAI API")
             return []
@@ -101,7 +105,7 @@ def create_chat_model(
     Returns:
         Configured ChatOpenAI instance.
     """
-    api_key = os.environ.get("OPENAI_API_KEY", "")
+    api_key = os.environ.get("MODEL_API_KEY", "")
     temperature = os.environ.get("TEMPERATURE", 0.7)
     max_tokens = os.environ.get("MAX_TOKENS", None)
 

@@ -27,8 +27,9 @@ def get_mem0_config() -> dict[str, Any]:
     Returns:
         Dictionary with llm and embedder configuration for Mem0.
     """
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    mem_model = os.environ.get("MEM_MODEL", "moonshotai/Kimi-K2.6")
+    api_key = os.environ.get("MODEL_API_KEY", "")
+    embedder_api_key = os.environ.get("EMBEDDER_API_KEY", "")
+    mem_model = os.environ.get("MEM_MODEL", "moonshotai/Kimi-K2.5")
     temperature = os.environ.get("TEMPERATURE", 0.6)
     embedder_model = os.environ.get("MEM_EMBEDDER_MODEL", "Qwen/Qwen3-Embedding-8B")
 
@@ -45,7 +46,7 @@ def get_mem0_config() -> dict[str, Any]:
         "embedder": {
             "provider": "openai",
             "config": {
-                "api_key": api_key,
+                "api_key": embedder_api_key,
                 "model": embedder_model,
                 "openai_base_url": EVROC_BASE_URL,
             },
@@ -63,7 +64,7 @@ def fetch_models() -> list[dict[str, str]]:
         Returns empty list if the fetch fails.
     """
     try:
-        api_key = os.environ.get("OPENAI_API_KEY", "")
+        api_key = os.environ.get("MODEL_API_KEY", "")
         if not api_key:
             logger.warning("No API key found for Evroc API")
             return []
@@ -90,17 +91,17 @@ def fetch_models() -> list[dict[str, str]]:
 
 
 @no_type_check
-def create_chat_model(model_id: str = "evroc:moonshotai/Kimi-K2.6") -> ChatOpenAI:
+def create_chat_model(model_id: str = "evroc:moonshotai/Kimi-K2.5") -> ChatOpenAI:
     """
     Create a LangChain ChatOpenAI instance for Evroc models.
 
     Args:
-        model_id: Model identifier with 'evroc:' prefix. Defaults to 'evroc:moonshotai/Kimi-K2.6'.
+        model_id: Model identifier with 'evroc:' prefix. Defaults to 'evroc:moonshotai/Kimi-K2.5'.
 
     Returns:
         Configured ChatOpenAI instance for the Evroc API.
     """
-    api_key = os.environ.get("OPENAI_API_KEY", "")
+    api_key = os.environ.get("MODEL_API_KEY", "")
     temperature = os.environ.get("TEMPERATURE", 0.6)
 
     # Strip 'evroc:' prefix if present

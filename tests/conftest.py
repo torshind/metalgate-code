@@ -209,7 +209,7 @@ async def run_agent(
         await conn.set_config_option(
             config_id="model",
             session_id=session.session_id,
-            value="evroc:moonshotai/Kimi-K2.6",
+            value="evroc:moonshotai/Kimi-K2.5",
         )
         await asyncio.wait_for(
             conn.prompt(
