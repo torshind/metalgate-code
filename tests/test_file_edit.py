@@ -7,7 +7,8 @@ import textwrap
 from pathlib import Path
 
 import pytest
-from conftest import RecordingClient, run_agent
+
+from tests.conftest import RecordingClient, run_agent
 
 logger = logging.getLogger("acp_test")
 

@@ -218,3 +218,54 @@ async def run_agent(
             ),
             timeout=timeout,
         )
+
+
+@pytest.fixture
+def tmp_pkg(tmp_path: Path) -> Path:
+    """Create a small fake package directory with one module."""
+    pkg = tmp_path / "fakelib"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text(
+        '"""Entry doc."""\n__all__ = ["foo"]\n', encoding="utf-8"
+    )
+    (pkg / "core.py").write_text(
+        '"""Core module."""\n'
+        "\n"
+        "class Worker:\n"
+        '    """Does work."""\n'
+        "    count: int\n"
+        '    def __init__(self, name: str = "anon"):\n'
+        "        self.name = name\n"
+        "    def do(self, amount: int) -> None:\n"
+        "        pass\n"
+        "\n"
+        "class Special:\n"
+        '    """Class with special methods."""\n'
+        "    def __init__(self, value: int) -> None:\n"
+        "        self.value = value\n"
+        "    def __repr__(self) -> str:\n"
+        '        return f"Special({self.value})"\n'
+        "    def __call__(self, x: int) -> int:\n"
+        "        return x * self.value\n"
+        "    def __len__(self) -> int:\n"
+        "        return self.value\n"
+        "    def _private_helper(self) -> None:\n"
+        "        pass\n"
+        "\n"
+        "def foo(x: int, *args, **kwargs) -> int:\n"
+        '    """Returns x."""\n'
+        "    return x\n",
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+@pytest.fixture
+def fake_site(tmp_pkg: Path) -> list[Path]:
+    """Return the temp path as a site-packages root so that _file_to_module works."""
+    return [tmp_pkg]
+
+
+@pytest.fixture
+def tmp_db(tmp_path: Path) -> str:
+    return str(tmp_path / "test.db")

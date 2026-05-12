@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 from acp import spawn_agent_process, text_block
 from acp.schema import ToolCallStart
-from conftest import AGENT_TIMEOUT, RecordingClient, logger
+
+from tests.conftest import AGENT_TIMEOUT, RecordingClient, logger
 
 
 async def run_agent_with_session(

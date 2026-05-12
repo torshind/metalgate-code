@@ -20,6 +20,10 @@ dependencies = [
     "markdownify>=1.2.0",
     "pyyaml>=6.0.0",
     "tavily-python>=0.7.0",
+    "tree-sitter",
+    "tree-sitter-python",
+    "jedi>=0.19.0",
+    "sqlalchemy>=2.0.0",
 ]
 
 [dependency-groups]
