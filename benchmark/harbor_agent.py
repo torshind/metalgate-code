@@ -37,9 +37,10 @@ class HarborAgent(BaseAgent):
         cwd = (await environment.exec("pwd")).stdout
         if cwd:
             cwd = cwd.strip()
+        await environment.exec(f"mkdir -p {cwd}/.metalgate")
         await environment.upload_file(
             source_path=Path("benchmark/skills.py"),
-            target_path=f"{cwd}/.metalgate/skills.py`",
+            target_path=f"{cwd}/.metalgate/skills.py",
         )
 
         session_context = AgentSessionContext(
