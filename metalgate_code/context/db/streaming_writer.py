@@ -79,6 +79,7 @@ class StreamingWriter:
         """Wait for indexing to complete."""
         if self._task:
             await self._task
+        await self._engine.dispose()
 
     async def _run(self) -> None:
         """Main indexing loop."""

@@ -1,6 +1,5 @@
 """Tests for context.indexer - StreamingWriter async indexer."""
 
-import asyncio
 from pathlib import Path
 
 import pytest
@@ -10,8 +9,8 @@ from sqlalchemy.orm import Session
 from metalgate_code.context.db import Base, Package, StreamingWriter
 from metalgate_code.context.indexer import (
     IndexStore,
-    is_indexing,
-    start_background_index,
+    start_indexing,
+    wait_for_indexing,
 )
 
 
@@ -77,11 +76,6 @@ async def test_streaming_writer_populates_existing(
     engine = create_engine(f"sqlite:///{writer.db_path}")
     Base.metadata.create_all(engine)
 
-    # # Clear any existing data from previous runs
-    # with Session(engine) as s:
-    #     s.execute(delete(Package))
-    #     s.commit()
-
     # Verify database is empty (no packages)
     with Session(engine) as s:
         initial_count = len(s.execute(select(Package)).scalars().all())
@@ -98,48 +92,19 @@ async def test_streaming_writer_populates_existing(
 
 
 @pytest.mark.asyncio
-async def test_start_background_index_creates_store(
-    tmp_path: Path, fake_site: list[Path]
-):
+async def test_start_indexing(tmp_path: Path, fake_site: list[Path]):
     """Test that start_background_index creates index store and starts indexing."""
     index_store = IndexStore(str(tmp_path))
     Path(index_store.db_path).unlink(missing_ok=True)
 
-    result = await start_background_index(
+    await start_indexing(
         cwd=str(tmp_path),
         site_roots=[str(s) for s in fake_site],
     )
 
-    assert "Background indexing started" in result
-
-    # Wait for indexing to complete
-    while is_indexing():
-        await asyncio.sleep(0.1)
+    await wait_for_indexing()
 
     assert index_store.db_path.exists()
-
-
-@pytest.mark.asyncio
-async def test_start_background_index_already_running(
-    tmp_path: Path, fake_site: list[Path]
-):
-    """Test that start_background_index returns message if already running."""
-    index_store = IndexStore(str(tmp_path))
-    Path(index_store.db_path).unlink(missing_ok=True)
-
-    # Start first indexing
-    await start_background_index(
-        cwd=str(tmp_path),
-        site_roots=[str(s) for s in fake_site],
-    )
-
-    # Try to start again
-    result = await start_background_index(
-        cwd=str(tmp_path),
-        site_roots=[str(s) for s in fake_site],
-    )
-
-    assert "already in progress" in result
 
 
 @pytest.mark.asyncio

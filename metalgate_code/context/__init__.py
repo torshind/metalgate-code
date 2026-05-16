@@ -32,7 +32,7 @@ from metalgate_code.context.db import (
 from metalgate_code.context.indexer import (
     IndexStore,
     is_indexing,
-    start_background_index,
+    start_indexing,
 )
 from metalgate_code.context.parsing import collect_files, find_site_packages, parse_file
 from metalgate_code.context.resolver import _resolve_forwarding
@@ -62,7 +62,7 @@ __all__ = [
     "parse_file",
     "_resolve_forwarding",
     # Indexer
-    "start_background_index",
+    "start_indexing",
     "is_indexing",
     "IndexStore",
 ]

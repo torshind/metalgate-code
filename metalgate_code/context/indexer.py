@@ -126,23 +126,21 @@ class IndexStore:
         return store.symbol_context(qualified_name)
 
 
-async def start_background_index(
+async def start_indexing(
     cwd: str, python: str | None = None, site_roots: list[str] | None = None
-) -> str:
+):
     """Start async background indexing of site-packages.
 
     Args:
         db_path: Path to the SQLite database file.
         python: Optional Python interpreter path. Uses current environment if None.
         site_roots: Optional list of site-packages paths to index.
-
-    Returns:
-        Status message indicating indexing has started.
     """
     global _writer
 
     if _writer and _writer.is_running():
-        return "Indexing already in progress."
+        logger.info("Indexing already in progress.")
+        return
 
     _writer = StreamingWriter(
         cwd=str(cwd),
@@ -152,7 +150,7 @@ async def start_background_index(
     )
     await _writer.start()
 
-    return f"Background indexing started. Database: {_writer.db_path}"
+    logger.info(f"Background indexing started. Database: {_writer.db_path}")
 
 
 def is_indexing() -> bool:
@@ -160,8 +158,30 @@ def is_indexing() -> bool:
     return _writer is not None and _writer.is_running()
 
 
+async def wait_for_indexing() -> None:
+    """Wait for background indexing to complete.
+
+    Does nothing if indexing is not running.
+    """
+    if _writer is not None:
+        await _writer.wait_for_completion()
+
+
+async def stop_indexing() -> None:
+    """Stop background indexing.
+
+    Does nothing if indexing is not running.
+    """
+    global _writer
+    if _writer is not None:
+        await _writer.stop()
+        _writer = None
+
+
 __all__ = [
     "IndexStore",
-    "start_background_index",
+    "start_indexing",
     "is_indexing",
+    "wait_for_indexing",
+    "stop_indexing",
 ]
