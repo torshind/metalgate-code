@@ -19,7 +19,7 @@ from deepagents_cli.local_context import LocalContextMiddleware
 from langgraph.graph.state import CompiledStateGraph
 
 from metalgate_code.config import get_interrupt_config
-from metalgate_code.context.indexer import IndexStore, build_index
+from metalgate_code.context.indexer import IndexStore
 from metalgate_code.memory.store import MemoryStore
 from metalgate_code.middleware import (
     CollectorMiddleware,
@@ -139,13 +139,7 @@ def _build_agent(
         except Exception as e:
             logger.warning(f"Failed to initialize memory: {e}")
 
-    db_dir = Path.home() / ".metalgate" / "memory" / Path(cwd).name
-    db_dir.mkdir(parents=True, exist_ok=True)
-    db_path = str(db_dir / "index.db")
-
-    build_index.invoke(db_path)
-
-    index_store = IndexStore(db_path)
+    index_store = IndexStore(cwd)
 
     return create_deep_agent(
         # Falls back to Deep Agent default model if not provided

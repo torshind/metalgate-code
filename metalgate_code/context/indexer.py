@@ -5,161 +5,163 @@ and writing results to the database.
 """
 
 import logging
-import time
 from pathlib import Path
+from typing import Literal
 
-from langchain_core.tools import tool
+from langchain_core.tools import BaseTool
+from pydantic import BaseModel, Field
 
-from metalgate_code.context.data import (
-    _ClassData,
-    _DecoratorApp,
-    _FuncData,
-    _ModuleData,
-)
-from metalgate_code.context.db import IndexStore as _IndexStore, write_index
-from metalgate_code.context.parsing import collect_files, find_site_packages, parse_file
-from metalgate_code.context.resolver import _resolve_forwarding
+from metalgate_code.context.db import _IndexStore
+from metalgate_code.context.db.streaming_writer import StreamingWriter
+from metalgate_code.helpers.paths import get_index_data_dir
 
 logger = logging.getLogger("metalgate_code")
 
+# Global state
+_writer: StreamingWriter | None = None
 
-@tool
-def build_index(
-    db_path: str, python: str | None = None, site_roots: list[str] | None = None
-) -> str:
-    """Build the symbol index from site-packages.
 
-    This function:
-    1. Finds site-packages directories (or uses provided ones)
-    2. Collects and parses Python files
-    3. Resolves *args/**kwargs forwarding
-    4. Writes results to SQLite database
-
-    Args:
-        db_path: Path to the SQLite database file (as string).
-        python: Optional Python interpreter path. If None, uses current environment.
-        site_roots: Optional list of site-packages paths. If provided, skips discovery.
-
-    Returns:
-        A summary string of the indexing results.
-    """
-    path = Path(db_path)
-    if site_roots is None:
-        roots = find_site_packages(python)
-    else:
-        roots = [Path(s) for s in site_roots]
-    if not roots:
-        return "No site-packages found."
-
-    def _should_report(i: int, total: int, interval: int) -> bool:
-        """Check if progress should be reported at this iteration."""
-        return (i + 1) % interval == 0 or (i + 1) == total
-
-    files = collect_files(roots)
-
-    all_modules: list[_ModuleData] = []
-    all_funcs: list[_FuncData] = []
-    all_classes: list[_ClassData] = []
-    all_apps: list[_DecoratorApp] = []
-
-    t0 = time.time()
-    report_every = max(1, len(files) // 20)
-
-    for i, f in enumerate(files):
-        if _should_report(i, len(files), report_every):
-            elapsed = time.time() - t0
-            pct = 100 * (i + 1) / len(files)
-            logger.info(
-                f"  [{pct:5.1f}%] {i + 1}/{len(files)} ({elapsed:.1f}s) {f.name}"
-            )
-        try:
-            md, funcs, classes, apps = parse_file(f, roots)
-            all_modules.append(md)
-            all_funcs.extend(funcs)
-            all_classes.extend(classes)
-            all_apps.extend(apps)
-        except Exception as e:
-            logger.warning(f"  [warn] {f}: {e}")
-
-    elapsed = time.time() - t0
-
-    # Resolve forwarding
-    t_resolve = time.time()
-    stats = _resolve_forwarding(all_funcs, all_classes, all_apps)
-    resolve_time = time.time() - t_resolve
-
-    # Write to DB
-    if path.exists():
-        path.unlink()
-    t_write = time.time()
-
-    write_index(path, all_modules, all_funcs, all_classes)
-
-    write_time = time.time() - t_write
-    size = path.stat().st_size
-    label = f"{size / 1_000_000:.1f}MB" if size > 1_000_000 else f"{size / 1_000:.1f}KB"
-
-    return (
-        f"Indexed {len(files)} files from {len(roots)} site-packages in {elapsed:.1f}s.\n"
-        f"Found {len(all_modules)} modules, {len(all_funcs)} functions, {len(all_classes)} classes.\n"
-        f"Resolved forwarding: {stats['resolved']} resolved, {stats['unresolvable']} unresolvable, "
-        f"{stats['opaque']} opaque ({resolve_time:.1f}s).\n"
-        f"Database written to {db_path} ({label}) in {write_time:.1f}s."
+class PackageContextInput(BaseModel):
+    package_name: str = Field(
+        description="The name of the package to look up (e.g., 'httpx')."
     )
 
 
-class IndexStore:
-    """Agent tool interface to the precomputed symbol index.
+class ModuleContextInput(BaseModel):
+    module_name: str = Field(
+        description="Fully qualified module name (e.g., 'httpx._client')."
+    )
 
-    Three methods, three zoom levels:
-        package_context("httpx")                       → table of contents
-        module_context("httpx._client")                → importable API surface
-        symbol_context("httpx._client.Client.get")     → full signature + docs
+
+class SymbolContextInput(BaseModel):
+    qualified_name: str = Field(
+        description="Fully qualified symbol name (e.g., 'httpx.Client.get')."
+    )
+
+
+class PackageContextTool(BaseTool):
+    """Get overview of a package."""
+
+    name: Literal["package_context"] = "package_context"
+    description: str = "Get overview of a package."
+    args_schema: type[BaseModel] = PackageContextInput
+
+    def __init__(self, index_store: "IndexStore", **kwargs):
+        super().__init__(**kwargs)
+        self._index_store = index_store
+
+    def _run(self, package_name: str) -> str:
+        return self._index_store._package_context_impl(package_name)
+
+
+class ModuleContextTool(BaseTool):
+    """Get all public objects in a module."""
+
+    name: Literal["module_context"] = "module_context"
+    description: str = "Get all public objects in a module."
+    args_schema: type[BaseModel] = ModuleContextInput
+
+    def __init__(self, index_store: "IndexStore", **kwargs):
+        super().__init__(**kwargs)
+        self._index_store = index_store
+
+    def _run(self, module_name: str) -> str:
+        return self._index_store._module_context_impl(module_name)
+
+
+class SymbolContextTool(BaseTool):
+    """Get full detail on a function or class."""
+
+    name: Literal["symbol_context"] = "symbol_context"
+    description: str = "Get full detail on a function or class."
+    args_schema: type[BaseModel] = SymbolContextInput
+
+    def __init__(self, index_store: "IndexStore", **kwargs):
+        super().__init__(**kwargs)
+        self._index_store = index_store
+
+    def _run(self, qualified_name: str) -> str:
+        return self._index_store._symbol_context_impl(qualified_name)
+
+
+class IndexStore:
+    """Agent tool interface to the live symbol index.
+
+    Works immediately - queries return partial results while indexing continues.
     """
 
-    def __init__(self, db_path: str):
-        self._store = _IndexStore(db_path)
+    def __init__(self, cwd: str):
+        self._store: _IndexStore | None = None
+        self.db_path = get_index_data_dir(cwd)
+        self.package_context = PackageContextTool(index_store=self)
+        self.module_context = ModuleContextTool(index_store=self)
+        self.symbol_context = SymbolContextTool(index_store=self)
 
-    @tool
-    def package_context(self, package_name: str) -> str:
-        """Get overview of a package: one line per module with a docstring summary.
+    def _ensure_store(self) -> _IndexStore | None:
+        if self._store is None:
+            if not Path(self.db_path).exists():
+                return None
+            self._store = _IndexStore(self.db_path)
+        return self._store
 
-        Args:
-            package_name: The name of the package to look up (e.g., "httpx", "requests").
+    def _package_context_impl(self, package_name: str) -> str:
+        """Get overview of a package."""
+        store = self._ensure_store()
+        if store is None:
+            return "Index not initialized yet."
+        return store.package_context(package_name)
 
-        Returns:
-            A formatted string with package overview, or "Package 'X' not found in index."
-        """
-        return self._store.package_context(package_name)
+    def _module_context_impl(self, module_name: str) -> str:
+        """Get all public objects in a module."""
+        store = self._ensure_store()
+        if store is None:
+            return "Index not initialized yet."
+        return store.module_context(module_name)
 
-    @tool
-    def module_context(self, module_name: str) -> str:
-        """Get all public objects in a module with short signatures.
-
-        Overloaded functions are shown as a grouped block of typed signatures.
-
-        Args:
-            module_name: The fully qualified module name (e.g., "httpx._client").
-
-        Returns:
-            A formatted string with module contents, or "Module 'X' not found in index."
-        """
-        return self._store.module_context(module_name)
-
-    @tool
-    def symbol_context(self, qualified_name: str) -> str:
-        """Get full detail on a function or class.
-
-        Overloaded functions are shown with all typed signatures listed.
-
-        Args:
-            qualified_name: The fully qualified symbol name
-                (e.g., "httpx._client.Client.get", "httpx.Client").
-
-        Returns:
-            A formatted string with full symbol details, or "Symbol 'X' not found."
-        """
-        return self._store.symbol_context(qualified_name)
+    def _symbol_context_impl(self, qualified_name: str) -> str:
+        """Get full detail on a function or class."""
+        store = self._ensure_store()
+        if store is None:
+            return "Index not initialized yet."
+        return store.symbol_context(qualified_name)
 
 
-__all__ = ["build_index", "IndexStore"]
+async def start_background_index(
+    cwd: str, python: str | None = None, site_roots: list[str] | None = None
+) -> str:
+    """Start async background indexing of site-packages.
+
+    Args:
+        db_path: Path to the SQLite database file.
+        python: Optional Python interpreter path. Uses current environment if None.
+        site_roots: Optional list of site-packages paths to index.
+
+    Returns:
+        Status message indicating indexing has started.
+    """
+    global _writer
+
+    if _writer and _writer.is_running():
+        return "Indexing already in progress."
+
+    _writer = StreamingWriter(
+        cwd=str(cwd),
+        python=python,
+        site_roots=site_roots,
+        on_package_done=lambda pkg: logger.info(f"Indexed: {pkg}"),
+    )
+    await _writer.start()
+
+    return f"Background indexing started. Database: {_writer.db_path}"
+
+
+def is_indexing() -> bool:
+    """Check if background indexing is running."""
+    return _writer is not None and _writer.is_running()
+
+
+__all__ = [
+    "IndexStore",
+    "start_background_index",
+    "is_indexing",
+]

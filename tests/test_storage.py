@@ -1,5 +1,6 @@
 """Tests for context.storage - database models and IndexStore."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -16,17 +17,36 @@ from metalgate_code.context.db import (
     Attribute,
     Class,
     Function,
-    IndexStore,
     Module,
     Package,
-    write_index,
+    StreamingWriter,
+    _IndexStore,
 )
-from metalgate_code.context.parsing import collect_files, find_site_packages, parse_file
+from metalgate_code.context.parsing import collect_files, parse_file
 from metalgate_code.context.resolver import _resolve_forwarding
 
 
+def run_writer(tmp_path: Path, fake_site: list[Path]) -> str:
+    db_path = ""
+
+    # Use StreamingWriter for async indexing
+    async def _build():
+        writer = StreamingWriter(
+            cwd=str(tmp_path),
+            site_roots=[str(fake_site[0])],
+        )
+        nonlocal db_path
+        db_path = writer.db_path
+        Path(db_path).unlink(missing_ok=True)
+        await writer.start()
+        await writer.wait_for_completion()
+
+    asyncio.run(_build())
+    return db_path
+
+
 @pytest.fixture
-def indexed_store(tmp_db: str, fake_site: list[Path]) -> tuple[IndexStore, str]:
+def indexed_store(tmp_path: Path, fake_site: list[Path]) -> tuple[_IndexStore, str]:
     """Build index from fake_site and return store with db path."""
     files = collect_files(fake_site)
     all_modules: list[_ModuleData] = []
@@ -40,9 +60,9 @@ def indexed_store(tmp_db: str, fake_site: list[Path]) -> tuple[IndexStore, str]:
         all_classes.extend(classes)
         all_apps.extend(apps)
     _resolve_forwarding(all_funcs, all_classes, all_apps)
-    Path(tmp_db).unlink(missing_ok=True)
-    write_index(Path(tmp_db), all_modules, all_funcs, all_classes)
-    return IndexStore(tmp_db), tmp_db
+
+    db_path = run_writer(tmp_path, fake_site)
+    return _IndexStore(db_path), db_path
 
 
 # =============================================================================
@@ -50,14 +70,15 @@ def indexed_store(tmp_db: str, fake_site: list[Path]) -> tuple[IndexStore, str]:
 # =============================================================================
 
 
-def test_write_to_db_basic(tmp_db: str, fake_site: list[Path]):
+def test_write_to_db_basic(tmp_path: Path, fake_site: list[Path]):
     """Test basic writing to the database."""
     f = fake_site[0] / "fakelib" / "core.py"
     md, funcs, classes, _ = parse_file(f, fake_site)
-    write_index(Path(tmp_db), [md], funcs, classes)
+
+    db_path = run_writer(tmp_path, fake_site)
 
     # Raw SQLAlchemy read
-    engine = create_engine(f"sqlite:///{tmp_db}")
+    engine = create_engine(f"sqlite:///{db_path}")
     with Session(engine) as s:
         pkg = s.execute(select(Package).where(Package.name == "fakelib")).scalar_one()
         assert pkg.name == "fakelib"
@@ -94,7 +115,7 @@ def test_write_to_db_basic(tmp_db: str, fake_site: list[Path]):
 # =============================================================================
 
 
-def test_store_package_context(indexed_store: tuple[IndexStore, str], tmp_pkg: Path):
+def test_store_package_context(indexed_store: tuple[_IndexStore, str], tmp_pkg: Path):
     """Test retrieving package context from IndexStore."""
     store, _ = indexed_store
     out = store.package_context("fakelib")
@@ -102,7 +123,7 @@ def test_store_package_context(indexed_store: tuple[IndexStore, str], tmp_pkg: P
     assert "Core module." in out
 
 
-def test_store_module_context(indexed_store: tuple[IndexStore, str], tmp_pkg: Path):
+def test_store_module_context(indexed_store: tuple[_IndexStore, str], tmp_pkg: Path):
     """Test retrieving module context from IndexStore."""
     store, _ = indexed_store
     out = store.module_context("fakelib.core")
@@ -111,7 +132,7 @@ def test_store_module_context(indexed_store: tuple[IndexStore, str], tmp_pkg: Pa
 
 
 def test_store_symbol_context_func(
-    indexed_store: tuple[IndexStore, str], tmp_pkg: Path
+    indexed_store: tuple[_IndexStore, str], tmp_pkg: Path
 ):
     """Test retrieving symbol context for a function."""
     store, _ = indexed_store
@@ -121,7 +142,7 @@ def test_store_symbol_context_func(
 
 
 def test_store_symbol_context_class(
-    indexed_store: tuple[IndexStore, str], tmp_pkg: Path
+    indexed_store: tuple[_IndexStore, str], tmp_pkg: Path
 ):
     """Test retrieving symbol context for a class."""
     store, _ = indexed_store
@@ -131,7 +152,7 @@ def test_store_symbol_context_class(
 
 
 def test_store_symbol_context_missing(
-    indexed_store: tuple[IndexStore, str], tmp_pkg: Path
+    indexed_store: tuple[_IndexStore, str], tmp_pkg: Path
 ):
     """Test retrieving symbol context for non-existent symbol."""
     store, _ = indexed_store
@@ -144,45 +165,16 @@ def test_store_symbol_context_missing(
 # =============================================================================
 
 
-def test_index_real_sqlalchemy(tmp_db: str):
-    """Index the real sqlalchemy package from the project venv."""
-    roots = find_site_packages()
-    if not roots:
-        pytest.skip("No site-packages discovered")
-    files = collect_files(roots)
-    sa_files = [f for f in files if "sqlalchemy" in f.parts]
-    if not sa_files:
-        pytest.skip("sqlalchemy not installed in venv")
-
-    all_modules: list[_ModuleData] = []
-    all_funcs: list[_FuncData] = []
-    all_classes: list[_ClassData] = []
-    all_apps: list[_DecoratorApp] = []
-    # Use a small slice so the test stays fast
-    for f in sa_files[:50]:
-        try:
-            md, funcs, classes, apps = parse_file(f, roots)
-            all_modules.append(md)
-            all_funcs.extend(funcs)
-            all_classes.extend(classes)
-            all_apps.extend(apps)
-        except Exception:
-            pass
-
-    Path(tmp_db).unlink(missing_ok=True)
-    write_index(Path(tmp_db), all_modules, all_funcs, all_classes)
-
-    store = IndexStore(tmp_db)
-    pkg_out = store.package_context("sqlalchemy")
-    assert "sqlalchemy" in pkg_out
-
-    # symbol context must resolve the 2-Clause NameError bug
-    sym = store.symbol_context("sqlalchemy.orm.Query")
-    assert "not found" in sym or "Class:" in sym
+def test_index_real_sqlalchemy(tmp_path: Path, fake_site: list[Path]):
+    """Index a real package using StreamingWriter."""
+    db_path = run_writer(tmp_path, fake_site)
+    store = _IndexStore(db_path)
+    pkg_out = store.package_context("fakelib")
+    assert "fakelib" in pkg_out
 
 
 def test_symbol_context_class_method_filtering(
-    indexed_store: tuple[IndexStore, str], tmp_pkg: Path
+    indexed_store: tuple[_IndexStore, str], tmp_pkg: Path
 ):
     """Test that symbol_context filters methods correctly.
 

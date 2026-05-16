@@ -119,18 +119,3 @@ async def test_agent_edit_preserves_encoding(run_sh: Path) -> None:
     assert marker in new_content, (
         f"UTF-8 marker '{marker}' not found in file.\nContent:\n{new_content}"
     )
-
-
-@pytest.mark.asyncio
-async def test_agent_call_skills(run_sh: Path) -> None:
-    """
-    Ensure the agent calls one of the predefined skills.
-    """
-    client = RecordingClient(prefix="acp_file_edit_test_")
-
-    await run_agent(
-        client,
-        run_sh,
-        "Use skills to list all files in the current directory.",
-    )
-    logger.info("Agent output:\n%s", client.all_text)

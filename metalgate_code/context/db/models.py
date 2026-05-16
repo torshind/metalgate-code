@@ -11,6 +11,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import (
     DeclarativeBase,
@@ -28,9 +29,14 @@ class Package(Base):
     __tablename__ = "package"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String, index=True, unique=True)
+    name: Mapped[str] = mapped_column(String, index=True)
+    version: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     modules: Mapped[list[Module]] = relationship("Module", back_populates="package_rel")
+
+    __table_args__ = (
+        UniqueConstraint("name", "version", name="uix_package_name_version"),
+    )
 
 
 class Module(Base):

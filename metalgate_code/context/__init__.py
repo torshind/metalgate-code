@@ -7,7 +7,7 @@ This package provides:
 
 Main exports:
   IndexStore: Database query interface for symbols.
-  build_index: Build the symbol index from site-packages.
+  StreamingWriter: Async incremental index builder.
 """
 
 from metalgate_code.context.data import (
@@ -23,13 +23,17 @@ from metalgate_code.context.db import (
     Base,
     Class,
     Function,
-    IndexStore,
     Module,
     Package,
     Parameter,
-    write_index,
+    StreamingWriter,
+    _IndexStore,
 )
-from metalgate_code.context.indexer import build_index
+from metalgate_code.context.indexer import (
+    IndexStore,
+    is_indexing,
+    start_background_index,
+)
 from metalgate_code.context.parsing import collect_files, find_site_packages, parse_file
 from metalgate_code.context.resolver import _resolve_forwarding
 
@@ -43,8 +47,8 @@ __all__ = [
     "Class",
     "Attribute",
     # Store and writer
-    "IndexStore",
-    "write_index",
+    "_IndexStore",
+    "StreamingWriter",
     # Transient data structures
     "_ModuleData",
     "_FuncData",
@@ -57,6 +61,8 @@ __all__ = [
     "collect_files",
     "parse_file",
     "_resolve_forwarding",
-    # Build index
-    "build_index",
+    # Indexer
+    "start_background_index",
+    "is_indexing",
+    "IndexStore",
 ]

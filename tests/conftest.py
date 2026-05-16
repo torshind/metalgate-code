@@ -264,8 +264,3 @@ def tmp_pkg(tmp_path: Path) -> Path:
 def fake_site(tmp_pkg: Path) -> list[Path]:
     """Return the temp path as a site-packages root so that _file_to_module works."""
     return [tmp_pkg]
-
-
-@pytest.fixture
-def tmp_db(tmp_path: Path) -> str:
-    return str(tmp_path / "test.db")

@@ -9,8 +9,8 @@ from metalgate_code.context.db.models import (
     Package,
     Parameter,
 )
-from metalgate_code.context.db.query import IndexStore
-from metalgate_code.context.db.writer import write_index
+from metalgate_code.context.db.query import IndexStore as _IndexStore
+from metalgate_code.context.db.streaming_writer import StreamingWriter
 
 __all__ = [
     "Base",
@@ -20,6 +20,6 @@ __all__ = [
     "Parameter",
     "Class",
     "Attribute",
-    "IndexStore",
-    "write_index",
+    "_IndexStore",
+    "StreamingWriter",
 ]

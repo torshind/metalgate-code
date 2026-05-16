@@ -40,7 +40,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from metalgate_code.memory import get_db_path
+from metalgate_code.helpers import get_checkpoints_data_dir
 
 logger = logging.getLogger("metalgate_code")
 
@@ -82,7 +82,7 @@ class MetalGateACP(AgentServerACP):
 
         # Use provided cwd or current working directory
         target_cwd = cwd or self._cwd or os.getcwd()
-        db_path = get_db_path(target_cwd)
+        db_path = get_checkpoints_data_dir(target_cwd)
 
         sessions: list[SessionInfo] = []
 
@@ -119,7 +119,7 @@ class MetalGateACP(AgentServerACP):
         """Check if a session exists in the checkpointer database."""
 
         _patch_aiosqlite()
-        db_path = get_db_path(cwd)
+        db_path = get_checkpoints_data_dir(cwd)
 
         if not db_path.exists():
             return False
@@ -220,7 +220,7 @@ class MetalGateACP(AgentServerACP):
 
         _patch_aiosqlite()
 
-        db_path = get_db_path(cwd)
+        db_path = get_checkpoints_data_dir(cwd)
         if not db_path.exists():
             return
 
@@ -341,7 +341,7 @@ class MetalGateACP(AgentServerACP):
         # Use the cwd associated with this session (stored at load/resume time)
         # Fall back to current cwd if session not found
         session_cwd = self._session_cwds.get(session_id, self._cwd)
-        db_path = get_db_path(session_cwd)
+        db_path = get_checkpoints_data_dir(session_cwd)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         logger.info(
             "Opening AsyncSqliteSaver checkpointer at %s for session %s",

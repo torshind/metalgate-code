@@ -261,6 +261,30 @@ async def test_session_replays_tool_calls(run_sh: Path) -> None:
     """
     client_play = RecordingClient(prefix="acp_session_test_")
 
+    test_skill_code = '''
+import subprocess
+from typing import Tuple
+
+from langchain_core.tools import tool
+
+
+def _run(cmd: str) -> Tuple[int, str]:
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+    output = (result.stdout + result.stderr).strip()
+    return (result.returncode, (output or f"exited {result.returncode}"))
+
+
+@tool
+def list_all_files(path: str) -> Tuple[int, str]:
+    """List all files and directories at the given path.
+    Returns a tuple of (returncode, output)."""
+    return _run(f"ls -al {path}")
+'''
+    metalgate_dir = client_play.temp_dir / ".metalgate"
+    metalgate_dir.mkdir(exist_ok=True)
+    skills_path = metalgate_dir / "skills.py"
+    skills_path.write_text(test_skill_code)
+
     # First interaction - ask agent to list files (should trigger a tool call)
     session_id = await run_agent_with_session(
         client_play,

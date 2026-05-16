@@ -94,7 +94,12 @@ class IndexStore:
                 .all()
             )
 
-            lines = [f"Package: {package_name}", f"Modules: {len(modules)}", ""]
+            version_str = f"@{pkg.version}" if pkg.version else ""
+            lines = [
+                f"Package: {package_name}{version_str}",
+                f"Modules: {len(modules)}",
+                "",
+            ]
             for mod in modules:
                 line = f"  {mod.name}"
                 if mod.docstring:
