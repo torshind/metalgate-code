@@ -102,13 +102,13 @@ def _build_agent(
             inherit_env=True,
             env=shell_env,
         )
-        backend = CompositeBackend(
-            default=shell_backend,
-            routes={
-                "/memories/": ephemeral_backend,
-                "/conversation_history/": ephemeral_backend,
-            },
-        )
+    backend = CompositeBackend(
+        default=shell_backend,
+        routes={
+            "/memories/": ephemeral_backend,
+            "/conversation_history/": ephemeral_backend,
+        },
+    )
 
     model = create_chat_model(context.model)
 
