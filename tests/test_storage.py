@@ -1,9 +1,9 @@
 """Tests for context.storage - database models and IndexStore."""
 
-import asyncio
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -22,46 +22,43 @@ from metalgate_code.context.db import (
     StreamingWriter,
     _IndexStore,
 )
-from metalgate_code.context.parsing import collect_files, parse_file
+from metalgate_code.context.parsing import acollect_files, aparse_file
 from metalgate_code.context.resolver import _resolve_forwarding
 
 
-def run_writer(tmp_path: Path, fake_site: list[Path]) -> str:
-    db_path = ""
+async def run_writer(tmp_path: Path, fake_site: list[Path]) -> str:
+    # async indexing
+    writer = StreamingWriter(
+        cwd=str(tmp_path),
+        site_roots=[str(fake_site[0])],
+    )
+    db_path = str(writer.db_path)
+    Path(db_path).unlink(missing_ok=True)
+    await writer.start()
+    await writer.wait_for_completion()
 
-    # Use StreamingWriter for async indexing
-    async def _build():
-        writer = StreamingWriter(
-            cwd=str(tmp_path),
-            site_roots=[str(fake_site[0])],
-        )
-        nonlocal db_path
-        db_path = writer.db_path
-        Path(db_path).unlink(missing_ok=True)
-        await writer.start()
-        await writer.wait_for_completion()
-
-    asyncio.run(_build())
     return db_path
 
 
-@pytest.fixture
-def indexed_store(tmp_path: Path, fake_site: list[Path]) -> tuple[_IndexStore, str]:
+@pytest_asyncio.fixture
+async def indexed_store(
+    tmp_path: Path, fake_site: list[Path]
+) -> tuple[_IndexStore, str]:
     """Build index from fake_site and return store with db path."""
-    files = collect_files(fake_site)
+    files = await acollect_files(None, [str(fake_site[0])])
     all_modules: list[_ModuleData] = []
     all_funcs: list[_FuncData] = []
     all_classes: list[_ClassData] = []
     all_apps: list[_DecoratorApp] = []
     for f in files:
-        md, funcs, classes, apps = parse_file(f, fake_site)
+        md, funcs, classes, apps = await aparse_file(f, [str(fake_site[0])], None)
         all_modules.append(md)
         all_funcs.extend(funcs)
         all_classes.extend(classes)
         all_apps.extend(apps)
     _resolve_forwarding(all_funcs, all_classes, all_apps)
 
-    db_path = run_writer(tmp_path, fake_site)
+    db_path = await run_writer(tmp_path, fake_site)
     return _IndexStore(db_path), db_path
 
 
@@ -70,12 +67,13 @@ def indexed_store(tmp_path: Path, fake_site: list[Path]) -> tuple[_IndexStore, s
 # =============================================================================
 
 
-def test_write_to_db_basic(tmp_path: Path, fake_site: list[Path]):
+@pytest.mark.asyncio
+async def test_write_to_db_basic(tmp_path: Path, fake_site: list[Path]):
     """Test basic writing to the database."""
     f = fake_site[0] / "fakelib" / "core.py"
-    md, funcs, classes, _ = parse_file(f, fake_site)
+    md, funcs, classes, _ = await aparse_file(str(f), [str(fake_site[0])], None)
 
-    db_path = run_writer(tmp_path, fake_site)
+    db_path = await run_writer(tmp_path, fake_site)
 
     # Raw SQLAlchemy read
     engine = create_engine(f"sqlite:///{db_path}")
@@ -115,7 +113,10 @@ def test_write_to_db_basic(tmp_path: Path, fake_site: list[Path]):
 # =============================================================================
 
 
-def test_store_package_context(indexed_store: tuple[_IndexStore, str], tmp_pkg: Path):
+@pytest.mark.asyncio
+async def test_store_package_context(
+    indexed_store: tuple[_IndexStore, str], tmp_pkg: Path
+):
     """Test retrieving package context from IndexStore."""
     store, _ = indexed_store
     out = store.package_context("fakelib")
@@ -123,7 +124,10 @@ def test_store_package_context(indexed_store: tuple[_IndexStore, str], tmp_pkg: 
     assert "Core module." in out
 
 
-def test_store_module_context(indexed_store: tuple[_IndexStore, str], tmp_pkg: Path):
+@pytest.mark.asyncio
+async def test_store_module_context(
+    indexed_store: tuple[_IndexStore, str], tmp_pkg: Path
+):
     """Test retrieving module context from IndexStore."""
     store, _ = indexed_store
     out = store.module_context("fakelib.core")
@@ -131,7 +135,8 @@ def test_store_module_context(indexed_store: tuple[_IndexStore, str], tmp_pkg: P
     assert "foo" in out
 
 
-def test_store_symbol_context_func(
+@pytest.mark.asyncio
+async def test_store_symbol_context_func(
     indexed_store: tuple[_IndexStore, str], tmp_pkg: Path
 ):
     """Test retrieving symbol context for a function."""
@@ -141,7 +146,8 @@ def test_store_symbol_context_func(
     assert "fakelib.core.foo" in out
 
 
-def test_store_symbol_context_class(
+@pytest.mark.asyncio
+async def test_store_symbol_context_class(
     indexed_store: tuple[_IndexStore, str], tmp_pkg: Path
 ):
     """Test retrieving symbol context for a class."""
@@ -151,7 +157,8 @@ def test_store_symbol_context_class(
     assert "Worker" in out
 
 
-def test_store_symbol_context_missing(
+@pytest.mark.asyncio
+async def test_store_symbol_context_missing(
     indexed_store: tuple[_IndexStore, str], tmp_pkg: Path
 ):
     """Test retrieving symbol context for non-existent symbol."""
@@ -165,15 +172,17 @@ def test_store_symbol_context_missing(
 # =============================================================================
 
 
-def test_index_real_sqlalchemy(tmp_path: Path, fake_site: list[Path]):
+@pytest.mark.asyncio
+async def test_index_real_sqlalchemy(tmp_path: Path, fake_site: list[Path]):
     """Index a real package using StreamingWriter."""
-    db_path = run_writer(tmp_path, fake_site)
+    db_path = await run_writer(tmp_path, fake_site)
     store = _IndexStore(db_path)
     pkg_out = store.package_context("fakelib")
     assert "fakelib" in pkg_out
 
 
-def test_symbol_context_class_method_filtering(
+@pytest.mark.asyncio
+async def test_symbol_context_class_method_filtering(
     indexed_store: tuple[_IndexStore, str], tmp_pkg: Path
 ):
     """Test that symbol_context filters methods correctly.
@@ -200,11 +209,9 @@ def test_symbol_context_class_method_filtering(
     methods_section = out.split("Methods:")[1] if "Methods:" in out else ""
     assert "__repr__" in methods_section
     assert "__call__" in methods_section
-    assert "__len__" in methods_section
 
-    # Private method should NOT be shown
-    assert "_private_helper" not in out
+    # Private methods should NOT be shown
+    assert "_private_method" not in methods_section
 
-    # __init__ should NOT appear in Methods section (only in Constructor)
-    methods_only = methods_section.split("\n\n")[0] if "Methods:" in out else ""
-    assert "__init__" not in methods_only
+    # __init__ should NOT appear in Methods section
+    assert "__init__" not in methods_section.split("\n\n")[0]

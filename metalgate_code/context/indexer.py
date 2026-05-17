@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 from typing import Literal
 
+from deepagents.backends.protocol import SandboxBackendProtocol
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
@@ -127,7 +128,10 @@ class IndexStore:
 
 
 async def start_indexing(
-    cwd: str, python: str | None = None, site_roots: list[str] | None = None
+    cwd: str,
+    python: str | None = None,
+    site_roots: list[str] | None = None,
+    backend: SandboxBackendProtocol | None = None,
 ):
     """Start async background indexing of site-packages.
 
@@ -135,6 +139,7 @@ async def start_indexing(
         db_path: Path to the SQLite database file.
         python: Optional Python interpreter path. Uses current environment if None.
         site_roots: Optional list of site-packages paths to index.
+        backend: Optional backend for executing file operations remotely.
     """
     global _writer
 
@@ -147,6 +152,7 @@ async def start_indexing(
         python=python,
         site_roots=site_roots,
         on_package_done=lambda pkg: logger.info(f"Indexed: {pkg}"),
+        backend=backend,
     )
     await _writer.start()
 

@@ -16,9 +16,10 @@ def _parts_to_module(parts: list[str]) -> str | None:
     return ".".join(result) if result else None
 
 
-def _file_to_module(path: Path, site_roots: list[Path]) -> str:
+def _file_to_module(path: Path | str, site_roots: list[Path]) -> str:
     """Convert a file path to its module name."""
-    resolved = path.resolve()
+    path_obj = Path(path)
+    resolved = path_obj.resolve()
 
     # Try site_roots first
     for sr in site_roots:
@@ -37,7 +38,7 @@ def _file_to_module(path: Path, site_roots: list[Path]) -> str:
     except ValueError:
         pass
 
-    return path.stem
+    return path_obj.stem
 
 
 __all__ = ["_parts_to_module", "_file_to_module"]

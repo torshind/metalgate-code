@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 import jedi
+from deepagents.backends.protocol import SandboxBackendProtocol
 
 from metalgate_code.context.data import (
     _ClassData,
@@ -55,35 +56,49 @@ def _extract_module_exports(code: str) -> list[str]:
     return exports
 
 
-def parse_file(
-    file: Path,
-    site_roots: list[Path],
+async def aparse_file(
+    file: str | Path,
+    site_roots: list[str],
+    backend: SandboxBackendProtocol | None,
 ) -> tuple[_ModuleData, list[_FuncData], list[_ClassData], list[_DecoratorApp]]:
-    """Parse a Python file using jedi and extract symbol information."""
-    module = _file_to_module(file, site_roots)
+    """Parse a Python file using jedi and extract symbol information.
+
+    Uses the backend for file operations if provided, otherwise falls back to local.
+    """
+    file_path = Path(file) if isinstance(file, str) else file
+    root_paths = [Path(r) for r in site_roots]
+    module = _file_to_module(file_path, root_paths)
     package = module.split(".")[0]
 
     # Single file read for all operations
     try:
-        code = file.read_text(encoding="utf-8")
-        src_bytes = code.encode("utf-8")
+        if backend is not None:
+            # Use backend to read file
+            result = await backend.aread(str(file))
+            if result.error is not None or result.file_data is None:
+                raise OSError(f"Failed to read file via backend: {result.error}")
+            code = result.file_data["content"]
+            src_bytes = code.encode("utf-8")
+        else:
+            code = file_path.read_text(encoding="utf-8")
+            src_bytes = code.encode("utf-8")
     except Exception as e:
         logger.error(f"Failed to read file {file}: {e}")
         md = _ModuleData()
         md.module = module
         md.package = package
-        md.file = str(file.resolve())
+        md.file = str(file_path.resolve())
         return md, [], [], []
 
     # Create Jedi script from code (avoids second file read)
     try:
-        script = jedi.Script(code=code, path=str(file))
+        script = jedi.Script(code=code, path=str(file_path))
     except Exception as e:
         logger.error(f"Failed to create Jedi script for {file}: {e}")
         md = _ModuleData()
         md.module = module
         md.package = package
-        md.file = str(file.resolve())
+        md.file = str(file_path.resolve())
         return md, [], [], []
 
     funcs: list[_FuncData] = []
@@ -108,7 +123,7 @@ def parse_file(
     md = _ModuleData()
     md.module = module
     md.package = package
-    md.file = str(file.resolve())
+    md.file = str(file_path.resolve())
     md.docstring = _extract_module_docstring(code)
     md.exports = _extract_module_exports(code)
 
@@ -132,4 +147,4 @@ def parse_file(
     return md, funcs, classes, apps
 
 
-__all__ = ["parse_file", "_extract_module_docstring", "_extract_module_exports"]
+__all__ = ["aparse_file", "_extract_module_docstring", "_extract_module_exports"]

@@ -34,7 +34,11 @@ from metalgate_code.context.indexer import (
     is_indexing,
     start_indexing,
 )
-from metalgate_code.context.parsing import collect_files, find_site_packages, parse_file
+from metalgate_code.context.parsing import (
+    acollect_files,
+    afind_site_packages,
+    aparse_file,
+)
 from metalgate_code.context.resolver import _resolve_forwarding
 
 __all__ = [
@@ -56,10 +60,10 @@ __all__ = [
     "_AttrData",
     "_ParamData",
     "_DecoratorApp",
-    # Extraction functions
-    "find_site_packages",
-    "collect_files",
-    "parse_file",
+    # Extraction functions (async with backend)
+    "afind_site_packages",
+    "acollect_files",
+    "aparse_file",
     "_resolve_forwarding",
     # Indexer
     "start_indexing",

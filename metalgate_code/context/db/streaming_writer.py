@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 from typing import Callable
 
+from deepagents.backends.protocol import SandboxBackendProtocol
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -23,7 +24,11 @@ from metalgate_code.context.db.models import (
     Package,
     Parameter,
 )
-from metalgate_code.context.parsing import collect_files, find_site_packages, parse_file
+from metalgate_code.context.parsing import (
+    acollect_files,
+    afind_site_packages,
+    aparse_file,
+)
 from metalgate_code.context.resolver import _resolve_forwarding
 from metalgate_code.helpers.paths import get_index_data_dir
 
@@ -44,11 +49,13 @@ class StreamingWriter:
         python: str | None = None,
         site_roots: list[str] | None = None,
         on_package_done: Callable[[str], None] | None = None,
+        backend: SandboxBackendProtocol | None = None,
     ):
         self.db_path = get_index_data_dir(cwd)
         self.python = python
         self.site_roots = site_roots
         self.on_package_done = on_package_done
+        self._backend = backend
         self._task: asyncio.Task | None = None
 
         async_url = f"sqlite+aiosqlite:///{self.db_path}"
@@ -83,18 +90,19 @@ class StreamingWriter:
 
     async def _run(self) -> None:
         """Main indexing loop."""
+        roots: list[str]
         if self.site_roots is None:
-            roots = find_site_packages(self.python)
+            roots = await afind_site_packages(self._backend, self.python)
         else:
-            roots = [Path(s) for s in self.site_roots]
+            roots = self.site_roots
         if not roots:
             logger.warning("No site-packages found")
             return
 
-        files = collect_files(roots)
+        files = await acollect_files(self._backend, roots)
 
         # Group by package
-        by_package: dict[str, list[Path]] = {}
+        by_package: dict[str, list[str]] = {}
         for f in files:
             pkg = self._guess_package(f, roots)
             by_package.setdefault(pkg, []).append(f)
@@ -118,27 +126,34 @@ class StreamingWriter:
 
         logger.info("Async indexing complete")
 
-    def _guess_package(self, file: Path, roots: list[Path]) -> str:
+    def _guess_package(self, file: str | Path, roots: list[str]) -> str:
         """Guess package name from file path."""
+        file_str = str(file)
         for root in roots:
-            try:
-                rel = file.relative_to(root)
-                parts = rel.parts
+            root_str = str(root)
+            if file_str.startswith(root_str + "/"):
+                rel = file_str[len(root_str) + 1 :]
+                parts = rel.split("/")
                 if len(parts) > 0:
                     if len(parts) > 1 and parts[1] in ("__init__.py",):
                         return parts[0]
                     return parts[0]
-            except ValueError:
-                continue
         return "unknown"
 
-    def _get_package_version(self, pkg_name: str, files: list[Path]) -> str | None:
+    async def _get_package_version(self, pkg_name: str, files: list[str]) -> str | None:
         """Extract package version from __init__.py or metadata files."""
         # Look for __init__.py with __version__
         for f in files:
-            if f.name == "__init__.py":
+            if f.endswith("/__init__.py") or f == "__init__.py":
                 try:
-                    content = f.read_text()
+                    if self._backend is not None:
+                        result = await self._backend.aread(f)
+                        if result.error is None and result.file_data is not None:
+                            content = result.file_data["content"]
+                        else:
+                            continue
+                    else:
+                        content = Path(f).read_text()
                     for line in content.split("\n"):
                         if "__version__" in line and "=" in line:
                             # Extract version string
@@ -201,8 +216,8 @@ class StreamingWriter:
     async def _write_package(
         self,
         pkg_name: str,
-        files: list[Path],
-        roots: list[Path],
+        files: list[str],
+        roots: list[str],
     ) -> None:
         """Index a single package and write to DB."""
         modules: list[_ModuleData] = []
@@ -211,9 +226,9 @@ class StreamingWriter:
         apps: list[_DecoratorApp] = []
 
         # Parse all files concurrently
-        async def parse_one(f: Path):
+        async def parse_one(f: str):
             try:
-                return parse_file(f, roots)
+                return await aparse_file(f, roots, self._backend)
             except Exception as e:
                 logger.warning(f"Parse error {f}: {e}")
                 return None
@@ -235,7 +250,7 @@ class StreamingWriter:
         _resolve_forwarding(funcs, classes, apps)
 
         # Get package version
-        version = self._get_package_version(pkg_name, files)
+        version = await self._get_package_version(pkg_name, files)
 
         # Write to DB
         async with self._async_session() as session:

@@ -52,9 +52,11 @@ class PythonContextMiddleware(AgentMiddleware):
                     python = result.output.strip()
                 else:
                     python = None
+        else:
+            python = None
         logger.info(f"Detected Python executable: {python}")
 
-        await start_indexing(cwd=self._cwd, python=python)
+        await start_indexing(cwd=self._cwd, python=python, backend=self._backend)
         return None
 
     async def aafter_agent(
