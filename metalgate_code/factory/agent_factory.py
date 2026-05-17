@@ -141,16 +141,6 @@ def _build_agent(
             logger.warning(f"Failed to initialize memory: {e}")
 
     index_store = IndexStore(cwd)
-    result = shell_backend.execute("uv run which python")
-    if result.exit_code is not None and result.exit_code == 0:
-        python = result.output.strip()
-    else:
-        result = shell_backend.execute("which python")
-        if result.exit_code is not None and result.exit_code == 0:
-            python = result.output.strip()
-        else:
-            python = None
-    logger.info(f"Detected Python executable: {python}")
 
     return create_deep_agent(
         # Falls back to Deep Agent default model if not provided
@@ -159,7 +149,7 @@ def _build_agent(
         interrupt_on=interrupt_config,
         middleware=[
             LocalContextMiddleware(backend=backend),
-            PythonContextMiddleware(cwd=cwd, python=python),
+            PythonContextMiddleware(cwd=cwd, backend=shell_backend),
             RecollectorMiddleware(memory=memory),
             ToolSkillsMiddleware(),
             DynamicToolsMiddleware(),

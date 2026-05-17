@@ -5,6 +5,7 @@ PythonContextMiddleware - Starts and stops the Python context indexer.
 import logging
 from typing import Any
 
+from deepagents.backends.protocol import SandboxBackendProtocol
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     ContextT,
@@ -23,7 +24,11 @@ class PythonContextMiddleware(AgentMiddleware):
     and stops it when the agent closes.
     """
 
-    def __init__(self, cwd: str, python: str | None = None):
+    def __init__(
+        self,
+        cwd: str,
+        backend: SandboxBackendProtocol | None = None,
+    ):
         """
         Initialize the middleware.
 
@@ -31,13 +36,25 @@ class PythonContextMiddleware(AgentMiddleware):
             cwd: The current working directory.
         """
         self._cwd = cwd
-        self._python = python
+        self._backend = backend
 
     async def abefore_agent(
         self, state: StateT, runtime: Runtime[ContextT]
     ) -> dict[str, Any] | None:
         """Start the Python context indexer when the agent starts."""
-        await start_indexing(cwd=self._cwd, python=self._python)
+        if self._backend is not None:
+            result = await self._backend.aexecute("uv run which python")
+            if result.exit_code is not None and result.exit_code == 0:
+                python = result.output.strip()
+            else:
+                result = await self._backend.aexecute("which python")
+                if result.exit_code is not None and result.exit_code == 0:
+                    python = result.output.strip()
+                else:
+                    python = None
+        logger.info(f"Detected Python executable: {python}")
+
+        await start_indexing(cwd=self._cwd, python=python)
         return None
 
     async def aafter_agent(
