@@ -9,11 +9,11 @@ from pathlib import Path
 
 from deepagents import create_deep_agent
 from deepagents.backends import (
-    BackendProtocol,
     CompositeBackend,
     LocalShellBackend,
     StateBackend,
 )
+from deepagents.backends.protocol import SandboxBackendProtocol
 from deepagents_acp.server import AgentSessionContext
 from deepagents_cli.local_context import LocalContextMiddleware
 from langgraph.graph.state import CompiledStateGraph
@@ -65,7 +65,7 @@ META_SKILLS = [
 
 def _build_agent(
     context: AgentSessionContext,
-    backend: BackendProtocol | None = None,
+    shell_backend: SandboxBackendProtocol | None = None,
 ) -> CompiledStateGraph:
     """Agent factory based on the given root directory."""
     logger.info("Model: %s", context.model)
@@ -93,7 +93,7 @@ def _build_agent(
     ephemeral_backend = StateBackend()
     shell_env = os.environ.copy()
 
-    if not backend:
+    if not shell_backend:
         # Use LocalShellBackend for filesystem + shell execution.
         # Provides `execute` tool via FilesystemMiddleware with per-command
         # timeout support.
@@ -141,6 +141,16 @@ def _build_agent(
             logger.warning(f"Failed to initialize memory: {e}")
 
     index_store = IndexStore(cwd)
+    result = shell_backend.execute("uv run which python")
+    if result.exit_code is not None and result.exit_code == 0:
+        python = result.output.strip()
+    else:
+        result = shell_backend.execute("which python")
+        if result.exit_code is not None and result.exit_code == 0:
+            python = result.output.strip()
+        else:
+            python = None
+    logger.info(f"Detected Python executable: {python}")
 
     return create_deep_agent(
         # Falls back to Deep Agent default model if not provided
@@ -148,8 +158,8 @@ def _build_agent(
         backend=backend,
         interrupt_on=interrupt_config,
         middleware=[
-            LocalContextMiddleware(backend=backend),  # type: ignore
-            PythonContextMiddleware(cwd=cwd),
+            LocalContextMiddleware(backend=backend),
+            PythonContextMiddleware(cwd=cwd, python=python),
             RecollectorMiddleware(memory=memory),
             ToolSkillsMiddleware(),
             DynamicToolsMiddleware(),

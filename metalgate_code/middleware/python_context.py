@@ -23,7 +23,7 @@ class PythonContextMiddleware(AgentMiddleware):
     and stops it when the agent closes.
     """
 
-    def __init__(self, cwd: str):
+    def __init__(self, cwd: str, python: str | None = None):
         """
         Initialize the middleware.
 
@@ -31,12 +31,13 @@ class PythonContextMiddleware(AgentMiddleware):
             cwd: The current working directory.
         """
         self._cwd = cwd
+        self._python = python
 
     async def abefore_agent(
         self, state: StateT, runtime: Runtime[ContextT]
     ) -> dict[str, Any] | None:
         """Start the Python context indexer when the agent starts."""
-        await start_indexing(cwd=self._cwd)
+        await start_indexing(cwd=self._cwd, python=self._python)
         return None
 
     async def aafter_agent(
