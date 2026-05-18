@@ -24,7 +24,6 @@ from metalgate_code.memory.store import MemoryStore
 from metalgate_code.middleware import (
     CollectorMiddleware,
     DynamicToolsMiddleware,
-    PythonContextMiddleware,
     RecollectorMiddleware,
     ToolSkillsMiddleware,
 )
@@ -149,7 +148,6 @@ def _build_agent(
         interrupt_on=interrupt_config,
         middleware=[
             LocalContextMiddleware(backend=backend),
-            PythonContextMiddleware(cwd=cwd, backend=shell_backend),
             RecollectorMiddleware(memory=memory),
             ToolSkillsMiddleware(),
             DynamicToolsMiddleware(),

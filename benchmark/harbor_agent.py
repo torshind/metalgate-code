@@ -1,10 +1,10 @@
-import tomllib
 from pathlib import Path
 
 from deepagents_acp.server import AgentSessionContext
 from harbor import AgentContext, BaseAgent, BaseEnvironment
 
 from benchmark.backend import HarborSandbox
+from metalgate_code.context.indexer import start_indexing, wait_for_indexing
 from metalgate_code.factory.agent_factory import _build_agent
 
 
@@ -21,9 +21,7 @@ class HarborAgent(BaseAgent):
         return "0.1.0"
 
     async def setup(self, environment: BaseEnvironment) -> None:
-        pyproject = tomllib.loads(Path("pyproject.toml").read_text())
-        deps = pyproject["project"]["dependencies"]
-        await environment.exec(f"pip install {' '.join(deps)}")
+        pass
 
     async def run(
         self,
@@ -49,6 +47,23 @@ class HarborAgent(BaseAgent):
             model=self._model_name,
         )
 
+        result = await backend.aexecute("uv run which python")
+        if result.exit_code is not None and result.exit_code == 0:
+            python = result.output.strip()
+        else:
+            result = await backend.aexecute("which python")
+            if result.exit_code is not None and result.exit_code == 0:
+                python = result.output.strip()
+            else:
+                python = None
+
+        await start_indexing(
+            cwd=cwd if cwd else "/testbed",
+            python=python,
+            backend=backend,
+        )
+        await wait_for_indexing()
+
         agent = _build_agent(session_context, backend)
 
         log_file = self.logs_dir / "agent.txt"
@@ -58,6 +73,10 @@ class HarborAgent(BaseAgent):
                 f.write(f"cwd: {cwd}\n")
             else:
                 f.write("Warning: pwd failed\n")
+            if python:
+                f.write(f"python: {python}\n")
+            else:
+                f.write("Warning: python detection failed\n")
             async for chunk in agent.astream(
                 {"messages": [{"role": "user", "content": instruction}]}
             ):
