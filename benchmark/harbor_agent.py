@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from deepagents_acp.server import AgentSessionContext
@@ -6,6 +7,15 @@ from harbor import AgentContext, BaseAgent, BaseEnvironment
 from benchmark.backend import HarborSandbox
 from metalgate_code.context.indexer import start_indexing, wait_for_indexing
 from metalgate_code.factory.agent_factory import _build_agent
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("/tmp/agent_debug.log", mode="w"),
+    ],
+)
+logger = logging.getLogger("metalgate_code")
 
 
 class HarborAgent(BaseAgent):
@@ -35,6 +45,12 @@ class HarborAgent(BaseAgent):
         cwd = (await environment.exec("pwd")).stdout
         if cwd:
             cwd = cwd.strip()
+
+        if cwd:
+            logger.info(f"cwd: {cwd}")
+        else:
+            logger.info("Warning: pwd failed")
+
         await environment.exec(f"mkdir -p {cwd}/.metalgate")
         await environment.upload_file(
             source_path=Path("benchmark/skills.py"),
@@ -47,19 +63,8 @@ class HarborAgent(BaseAgent):
             model=self._model_name,
         )
 
-        result = await backend.aexecute("uv run which python")
-        if result.exit_code is not None and result.exit_code == 0:
-            python = result.output.strip()
-        else:
-            result = await backend.aexecute("which python")
-            if result.exit_code is not None and result.exit_code == 0:
-                python = result.output.strip()
-            else:
-                python = None
-
         await start_indexing(
             cwd=cwd if cwd else "/testbed",
-            python=python,
             backend=backend,
         )
         await wait_for_indexing()
@@ -69,14 +74,6 @@ class HarborAgent(BaseAgent):
         log_file = self.logs_dir / "agent.txt"
 
         with open(log_file, "w") as f:
-            if cwd:
-                f.write(f"cwd: {cwd}\n")
-            else:
-                f.write("Warning: pwd failed\n")
-            if python:
-                f.write(f"python: {python}\n")
-            else:
-                f.write("Warning: python detection failed\n")
             async for chunk in agent.astream(
                 {"messages": [{"role": "user", "content": instruction}]}
             ):

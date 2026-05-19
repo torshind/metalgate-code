@@ -1,6 +1,7 @@
 """File collection utilities for finding Python source files."""
 
 import json
+import logging
 from pathlib import Path
 
 from deepagents.backends.protocol import SandboxBackendProtocol
@@ -62,7 +63,7 @@ async def afind_site_packages(
 
 
 async def acollect_files(
-    backend: "SandboxBackendProtocol | None", roots: list[str]
+    backend: SandboxBackendProtocol | None, roots: list[str]
 ) -> list[str]:
     """Collect Python files from the given roots using backend, preferring .pyi over .py.
 
@@ -94,6 +95,8 @@ async def acollect_files(
     for root in roots:
         # Get .py files
         py_result = await backend.aglob("*.py", root)
+        logging.debug(f"Found .py files: {py_result.matches}")
+        logging.debug(f"Error: {py_result.error}")
         if py_result.matches:
             for match in py_result.matches:
                 # match["path"] may be relative or absolute depending on backend
@@ -107,6 +110,8 @@ async def acollect_files(
 
         # Get .pyi files (override .py)
         pyi_result = await backend.aglob("*.pyi", root)
+        logging.debug(f"Found .pyi files: {pyi_result.matches}")
+        logging.debug(f"Error: {pyi_result.error}")
         if pyi_result.matches:
             for match in pyi_result.matches:
                 # match["path"] may be relative or absolute depending on backend

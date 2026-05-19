@@ -5,6 +5,7 @@ and writing results to the database.
 """
 
 import logging
+from multiprocessing.synchronize import Event
 from pathlib import Path
 from typing import Literal
 
@@ -129,9 +130,9 @@ class IndexStore:
 
 async def start_indexing(
     cwd: str,
-    python: str | None = None,
+    backend: SandboxBackendProtocol,
     site_roots: list[str] | None = None,
-    backend: SandboxBackendProtocol | None = None,
+    stop_event: Event | None = None,
 ):
     """Start async background indexing of site-packages.
 
@@ -144,8 +145,28 @@ async def start_indexing(
     global _writer
 
     if _writer and _writer.is_running():
-        logger.info("Indexing already in progress.")
-        return
+        if _writer.cwd == cwd:
+            logger.info("Indexing already in progress.")
+            return
+        else:
+            logger.info("Indexing in progress for a different directory.")
+            await _writer.stop()
+            _writer = None
+
+    result = await backend.aexecute("uv run which python")
+    if result.exit_code is not None and result.exit_code == 0:
+        python = result.output.strip()
+    else:
+        result = await backend.aexecute("which python")
+        if result.exit_code is not None and result.exit_code == 0:
+            python = result.output.strip()
+        else:
+            python = None
+
+    if python:
+        logger.info(f"python: {python}")
+    else:
+        logger.info("Warning: python detection failed")
 
     _writer = StreamingWriter(
         cwd=str(cwd),
@@ -153,6 +174,7 @@ async def start_indexing(
         site_roots=site_roots,
         on_package_done=lambda pkg: logger.info(f"Indexed: {pkg}"),
         backend=backend,
+        stop_event=stop_event,
     )
     await _writer.start()
 

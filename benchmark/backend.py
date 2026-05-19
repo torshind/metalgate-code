@@ -5,6 +5,7 @@ import logging
 import shlex
 import tempfile
 from pathlib import Path
+from typing import Coroutine, TypeVar, cast
 
 from deepagents.backends.filesystem import _map_exception_to_standard_error
 from deepagents.backends.protocol import (
@@ -24,6 +25,25 @@ from deepagents.backends.protocol import (
 )
 from deepagents.backends.utils import check_empty_content
 from harbor.environments.base import BaseEnvironment
+
+T = TypeVar("T")
+
+
+def _run_async(coro: Coroutine[None, None, T]) -> T:
+    """Run an async coroutine, handling both sync and async contexts."""
+    try:
+        _ = asyncio.get_running_loop()
+    except RuntimeError:
+        # No event loop running - use asyncio.run()
+        return asyncio.run(coro)
+    else:
+        # Event loop is running - schedule and run until complete
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, coro)
+            return cast(T, future.result())
+
 
 _SYNC_NOT_SUPPORTED = (
     "This backend only supports async execution. Use the async variant instead."
@@ -133,6 +153,7 @@ class HarborSandbox(SandboxBackendProtocol):
         return ExecuteResponse(
             output=output,
             exit_code=result.return_code,
+            truncated=False,
         )
 
     def execute(
@@ -142,7 +163,7 @@ class HarborSandbox(SandboxBackendProtocol):
         timeout: int | None = None,
     ) -> ExecuteResponse:
         """Execute a bash command in the task environment."""
-        raise NotImplementedError(_SYNC_NOT_SUPPORTED)
+        return _run_async(self.aexecute(command, timeout=timeout))
 
     @property
     def id(self) -> str:
@@ -162,6 +183,9 @@ class HarborSandbox(SandboxBackendProtocol):
         """
         safe_path = shlex.quote(file_path)
 
+        # awk uses 1-based line numbers, so offset 0 means start from line 1
+        awk_start = offset + 1
+        awk_end = offset + limit
         cmd = f"""
 if [ ! -f {safe_path} ]; then
     echo "Error: File not found"
@@ -170,9 +194,9 @@ fi
 if [ ! -s {safe_path} ]; then
     exit 0
 fi
-awk -v offset={offset} -v limit={limit} '
-    NR > offset && NR <= offset + limit {{ print }}
-    NR > offset + limit {{ exit }}
+awk -v start={awk_start} -v end={awk_end} '
+    NR >= start && NR <= end {{ print }}
+    NR > end {{ exit }}
 ' {safe_path}
 """
         result = await self.aexecute(cmd)
@@ -195,7 +219,7 @@ awk -v offset={offset} -v limit={limit} '
         limit: int = 2000,
     ) -> ReadResult:
         """Read file content with line numbers using shell commands."""
-        raise NotImplementedError(_SYNC_NOT_SUPPORTED)
+        return _run_async(self.aread(file_path, offset=offset, limit=limit))
 
     async def awrite(
         self,
@@ -212,7 +236,7 @@ awk -v offset={offset} -v limit={limit} '
         # Step 1: existence check + mkdir (small command, no ARG_MAX risk).
         check_cmd = f"""
 if [ -e {safe_path} ]; then
-    echo 'Error: File already exists: '{safe_path} >&2
+    echo 'Error: File already exists: {safe_path}' >&2
     exit 1
 fi
 mkdir -p "$(dirname {safe_path})" 2>/dev/null
@@ -225,6 +249,7 @@ mkdir -p "$(dirname {safe_path})" 2>/dev/null
 
         # Step 2: transfer content via Harbor's native file upload
         # (bypasses ARG_MAX entirely — data never touches the command line).
+        tmp_path: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".tmp", delete=False, encoding="utf-8"
@@ -241,12 +266,13 @@ mkdir -p "$(dirname {safe_path})" 2>/dev/null
                 raise
             return WriteResult(error=f"Failed to write file '{file_path}': {error}")
         finally:
-            try:
-                tmp_path.unlink()
-            except OSError:
-                logger.warning(
-                    "Failed to clean up temp file %s", tmp_path, exc_info=True
-                )
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    logger.warning(
+                        "Failed to clean up temp file %s", tmp_path, exc_info=True
+                    )
 
         return WriteResult(path=file_path)
 
@@ -255,11 +281,8 @@ mkdir -p "$(dirname {safe_path})" 2>/dev/null
         file_path: str,
         content: str,
     ) -> WriteResult:
-        """Create a new file (sync).
-
-        Not supported; use `awrite`.
-        """
-        raise NotImplementedError(_SYNC_NOT_SUPPORTED)
+        """Create a new file (sync)."""
+        return _run_async(self.awrite(file_path, content))
 
     async def aedit(
         self,
@@ -329,11 +352,10 @@ mkdir -p "$(dirname {safe_path})" 2>/dev/null
         new_string: str,
         replace_all: bool = False,
     ) -> EditResult:
-        """Edit a file by replacing string occurrences (sync).
-
-        Not supported; use `aedit`.
-        """
-        raise NotImplementedError(_SYNC_NOT_SUPPORTED)
+        """Edit a file by replacing string occurrences (sync)."""
+        return _run_async(
+            self.aedit(file_path, old_string, new_string, replace_all=replace_all)
+        )
 
     async def als(self, path: str) -> LsResult:
         """List directory contents with metadata using shell commands."""
@@ -342,6 +364,10 @@ mkdir -p "$(dirname {safe_path})" 2>/dev/null
         cmd = f"""
 if [ ! -d {safe_path} ]; then
     exit 1
+fi
+# Check if directory is empty
+if [ -z "$(ls -A {safe_path} 2>/dev/null)" ]; then
+    exit 0
 fi
 for entry in {safe_path}/*; do
     if [ -e "$entry" ]; then
@@ -377,7 +403,7 @@ done
 
     def ls(self, path: str) -> LsResult:
         """List directory contents with metadata using shell commands."""
-        raise NotImplementedError(_SYNC_NOT_SUPPORTED)
+        return _run_async(self.als(path))
 
     async def agrep(
         self,
@@ -440,37 +466,36 @@ done
         path: str | None = None,
         glob: str | None = None,
     ) -> GrepResult:
-        """Search for a literal string in files using `grep -F` (sync).
-
-        Not supported; use `agrep`.
-        """
-        raise NotImplementedError(_SYNC_NOT_SUPPORTED)
+        """Search for a literal string in files using `grep -F` (sync)."""
+        return _run_async(self.agrep(pattern, path=path, glob=glob))
 
     async def aglob(self, pattern: str, path: str = "/") -> GlobResult:
         """Find files matching glob pattern using shell commands.
 
-        Please note that this implementation does not currently support all glob
-        patterns.
+        Recursively searches for files matching the glob pattern using find.
+        Supports patterns like '*.py', '**/*.py', '*.pyi', etc.
         """
         safe_path = shlex.quote(path)
-        safe_pattern = shlex.quote(pattern)
 
-        cmd = f"""
-cd {safe_path} 2>/dev/null || exit 1
-# Use find with shell globbing
-for file in {safe_pattern}; do
-    if [ -e "$file" ]; then
-        if [ -d "$file" ]; then
-            printf '%s|true\\n' "$file"
-        else
-            printf '%s|false\\n' "$file"
-        fi
-    fi
-done
-"""
-        result = await self.aexecute(cmd)
+        # Convert glob pattern to find-compatible pattern
+        # Handle **/ prefix for recursive matching
+        find_pattern = pattern
+        if find_pattern.startswith("**/"):
+            # **/pattern → match at any depth
+            find_pattern = find_pattern[3:]  # Remove **/
+            find_cmd = f"find {safe_path} -name {shlex.quote(find_pattern)} -type f 2>/dev/null"
+        elif "/" in find_pattern:
+            # Path with directory components - use full path matching
+            find_cmd = f"find {safe_path} -path {shlex.quote(find_pattern)} -type f 2>/dev/null"
+        else:
+            # Simple glob like '*.py' - match at any depth
+            find_cmd = f"find {safe_path} -name {shlex.quote(find_pattern)} -type f 2>/dev/null"
 
-        if result.exit_code != 0:
+        result = await self.aexecute(find_cmd)
+
+        # find returns exit code 0 even with no matches, so we only check for errors
+        # if there's stderr output or exit code > 1
+        if result.exit_code is not None and result.exit_code > 1:
             detail = result.output.strip() if result.output else ""
             return GlobResult(
                 error=f"Path not found or not accessible: {path}"
@@ -481,27 +506,18 @@ done
         if not output:
             return GlobResult(matches=[])
 
-        # Parse output into FileInfo dicts
+        # Parse find output (one path per line) into FileInfo dicts
         file_infos: list[FileInfo] = []
         for line in output.split("\n"):
             if not line:
                 continue
-            parts = line.split("|")
-            if len(parts) == _PIPE_FIELD_COUNT:
-                file_infos.append(
-                    {
-                        "path": parts[0],
-                        "is_dir": parts[1] == "true",
-                    }
-                )
-            else:
-                logger.debug("Skipping malformed glob output line: %r", line)
+            file_infos.append({"path": line, "is_dir": False})
 
         return GlobResult(matches=file_infos)
 
     def glob(self, pattern: str, path: str = "/") -> GlobResult:
         """Find files matching glob pattern using shell commands."""
-        raise NotImplementedError(_SYNC_NOT_SUPPORTED)
+        return _run_async(self.aglob(pattern, path=path))
 
     # -- file transfer via Harbor's native upload/download -------------------
 
@@ -545,8 +561,8 @@ done
         return results
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
-        """Upload files (sync). Not supported; use `aupload_files`."""
-        raise NotImplementedError(_SYNC_NOT_SUPPORTED)
+        """Upload files (sync)."""
+        return _run_async(self.aupload_files(files))
 
     async def adownload_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         """Download files using Harbor's native file transfer."""
@@ -571,5 +587,5 @@ done
         return results
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
-        """Download files (sync). Not supported; use `adownload_files`."""
-        raise NotImplementedError(_SYNC_NOT_SUPPORTED)
+        """Download files (sync)."""
+        return _run_async(self.adownload_files(paths))

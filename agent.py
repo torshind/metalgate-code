@@ -11,6 +11,7 @@ from dotenv import find_dotenv, load_dotenv
 
 from metalgate_code.config import get_available_modes
 from metalgate_code.factory import MetalGateACP, create_agent
+from metalgate_code.factory.agent_factory import LocalShellBackend
 from metalgate_code.models import fetch_models
 
 logging.basicConfig(
@@ -37,8 +38,18 @@ async def _serve_agent() -> None:
     # Fetch models from the configured provider API
     models = fetch_models()
 
+    def make_shell_backend(cwd: str) -> LocalShellBackend:
+        """Factory that creates the shell backend when cwd is known."""
+        shell_env = os.environ.copy()
+        return LocalShellBackend(
+            root_dir=cwd,
+            inherit_env=True,
+            env=shell_env,
+        )
+
     acp_agent = MetalGateACP(
-        agent=create_agent(),
+        agent_factory=create_agent(),
+        backend_factory=make_shell_backend,
         modes=modes,
         models=models,
     )

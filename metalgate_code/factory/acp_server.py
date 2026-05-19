@@ -2,9 +2,13 @@
 ACP Server factory for MetalGate Code agent.
 """
 
+import asyncio
 import logging
 import os
-from typing import Any
+from multiprocessing import Event as EventFactory
+from multiprocessing import Process
+from multiprocessing.synchronize import Event
+from typing import Any, Callable
 
 from acp.helpers import (
     start_tool_call,
@@ -16,6 +20,7 @@ from acp.helpers import (
 from acp.schema import (
     AgentCapabilities,
     AudioContentBlock,
+    CloseSessionResponse,
     EmbeddedResourceContentBlock,
     HttpMcpServer,
     ImageContentBlock,
@@ -23,6 +28,7 @@ from acp.schema import (
     ListSessionsResponse,
     LoadSessionResponse,
     McpServerStdio,
+    NewSessionResponse,
     PromptCapabilities,
     PromptResponse,
     ResourceContentBlock,
@@ -34,12 +40,15 @@ from acp.schema import (
     SseMcpServer,
     TextContentBlock,
 )
-from deepagents_acp.server import AgentServerACP
+from deepagents.backends.protocol import SandboxBackendProtocol
+from deepagents_acp.server import AgentServerACP, AgentSessionContext
 from deepagents_cli.sessions import _patch_aiosqlite
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.graph.state import CompiledStateGraph
 
+from metalgate_code.context.indexer import start_indexing
 from metalgate_code.helpers import get_checkpoints_data_dir
 
 logger = logging.getLogger("metalgate_code")
@@ -47,6 +56,35 @@ logger = logging.getLogger("metalgate_code")
 
 class MetalGateACP(AgentServerACP):
     """Custom ACP server with AsyncSqliteSaver checkpointer."""
+
+    def __init__(
+        self,
+        agent_factory: Callable[
+            [AgentSessionContext, SandboxBackendProtocol | None], CompiledStateGraph
+        ],
+        backend_factory: Callable[[str], SandboxBackendProtocol],
+        modes: Any,
+        models: Any,
+    ) -> None:
+        """Initialize with agent factory and backend factory.
+
+        Args:
+            agent_factory: Function that takes (context, backend) and returns CompiledStateGraph
+            backend_factory: Function that takes cwd and returns SandboxBackendProtocol
+            modes: Session modes configuration
+            models: Available models list
+        """
+        self._user_agent_factory = agent_factory
+        self._backend_factory = backend_factory
+        self._shell_backend: SandboxBackendProtocol
+        self._indexer_process: Process | None = None
+        self._indexer_stop_event: Event | None = None
+        # Pass wrapper as the agent to the base class
+        super().__init__(agent=self._create_agent, modes=modes, models=models)
+
+    def _create_agent(self, context: AgentSessionContext) -> CompiledStateGraph:
+        """Called by base class to create the agent for a session."""
+        return self._user_agent_factory(context, self._shell_backend)
 
     async def initialize(
         self,
@@ -69,6 +107,23 @@ class MetalGateACP(AgentServerACP):
                 ),
             ),
         )
+
+    def _setup_session(self, cwd: str) -> None:
+        self._shell_backend = self._backend_factory(cwd)
+        self._indexer_process, self._indexer_stop_event = spawn_indexing_process(
+            cwd, self._shell_backend
+        )
+
+    async def new_session(
+        self,
+        cwd: str,
+        mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
+        **kwargs: Any,  # noqa: ARG002  # ACP protocol interface parameter
+    ) -> NewSessionResponse:
+        logger.info(f"Creating new session for cwd {cwd}")
+        self._setup_session(cwd)
+
+        return await super().new_session(cwd, mcp_servers, **kwargs)
 
     async def list_sessions(
         self,
@@ -132,7 +187,7 @@ class MetalGateACP(AgentServerACP):
             ) as cursor:
                 return await cursor.fetchone() is not None
 
-    async def _setup_session(
+    async def _restore_session(
         self,
         session_id: str,
         cwd: str,
@@ -145,12 +200,12 @@ class MetalGateACP(AgentServerACP):
         Returns:
             Tuple of (modes, config_options) to use in the response.
         """
+        self._setup_session(cwd)
+
         # Verify session exists
         exists = await self._session_exists(session_id, cwd)
         if not exists:
-            logger.warning(
-                "Session %s not found in database for cwd %s", session_id, cwd
-            )
+            logger.warning(f"Session {session_id} not found in database for cwd {cwd}")
 
         # Store session context - cwd comes from client
         self._session_cwds[session_id] = cwd
@@ -185,9 +240,9 @@ class MetalGateACP(AgentServerACP):
         Verifies the session exists in the checkpointer before returning.
         The cwd is provided by the client and used as-is.
         """
-        logger.info("Loading session %s for cwd %s", session_id, cwd)
+        logger.info(f"Loading session {session_id} for cwd {cwd}")
 
-        modes, config_options = await self._setup_session(session_id, cwd)
+        modes, config_options = await self._restore_session(session_id, cwd)
 
         return LoadSessionResponse(
             modes=modes,
@@ -206,14 +261,39 @@ class MetalGateACP(AgentServerACP):
         Verifies the session exists in the checkpointer before returning.
         The cwd is provided by the client and used as-is.
         """
-        logger.info("Resuming session %s for cwd %s", session_id, cwd)
+        logger.info(f"Resuming session {session_id} for cwd {cwd}")
 
-        modes, config_options = await self._setup_session(session_id, cwd)
+        modes, config_options = await self._restore_session(session_id, cwd)
 
         return ResumeSessionResponse(
             modes=modes,
             config_options=config_options,
         )
+
+    async def close_session(
+        self, session_id: str, **kwargs: Any
+    ) -> CloseSessionResponse | None:
+        logger.info(f"Closing session {session_id}")
+
+        # Signal the indexer to stop gracefully
+        if self._indexer_stop_event is not None:
+            logger.info("Signaling indexer to stop")
+            self._indexer_stop_event.set()
+
+        # Wait for the indexer process to finish
+        if self._indexer_process is not None and self._indexer_process.is_alive():
+            logger.info("Waiting for indexer process to finish")
+            self._indexer_process.join(timeout=10)
+            if self._indexer_process.is_alive():
+                logger.warning("Indexer process did not stop in time, terminating")
+                self._indexer_process.terminate()
+                self._indexer_process.join(timeout=5)
+
+        # Reset state
+        self._indexer_process = None
+        self._indexer_stop_event = None
+
+        return await super().close_session(session_id, **kwargs)
 
     async def _replay_chat_history(self, session_id: str, cwd: str) -> None:
         """Replay chat history by sending session_update notifications."""
@@ -239,7 +319,7 @@ class MetalGateACP(AgentServerACP):
                 messages = channel_values.get("messages", [])
 
                 logger.info(
-                    "Replaying %d messages for session %s", len(messages), session_id
+                    f"Replaying {len(messages)} messages for session {session_id}"
                 )
 
                 # Replay each message as a session update
@@ -247,7 +327,7 @@ class MetalGateACP(AgentServerACP):
                     await self._send_message_chunk(session_id, msg)
 
         except Exception as e:
-            logger.warning("Error replaying chat history: %s", e)
+            logger.warning(f"Error replaying chat history: {e}")
 
     def _extract_text_from_content(self, content: Any) -> str | None:
         """Extract text from content which may be a string or list of blocks."""
@@ -272,7 +352,7 @@ class MetalGateACP(AgentServerACP):
             elif isinstance(msg, ToolMessage):
                 await self._send_tool_message(session_id, msg)
         except Exception as e:
-            logger.warning("Error sending message chunk: %s", e)
+            logger.warning(f"Error sending message chunk: {e}")
 
     async def _send_human_message(self, session_id: str, msg: HumanMessage) -> None:
         text = self._extract_text_from_content(msg.content)
@@ -328,6 +408,7 @@ class MetalGateACP(AgentServerACP):
         **kwargs: Any,
     ) -> PromptResponse:
         """Process a user prompt with AsyncSqliteSaver checkpointer."""
+        logger.debug(f"Prompting session {session_id} with prompt {prompt}")
 
         _patch_aiosqlite()
 
@@ -344,9 +425,7 @@ class MetalGateACP(AgentServerACP):
         db_path = get_checkpoints_data_dir(session_cwd)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         logger.info(
-            "Opening AsyncSqliteSaver checkpointer at %s for session %s",
-            db_path,
-            session_id,
+            f"Opening AsyncSqliteSaver checkpointer at {db_path} for session {session_id}"
         )
 
         # from_conn_string is an async context manager
@@ -358,3 +437,43 @@ class MetalGateACP(AgentServerACP):
         # Note: checkpointer is closed when exiting the context
         self._agent.checkpointer = None
         return result
+
+
+def _run_indexing_subprocess(
+    cwd: str, backend: SandboxBackendProtocol, stop_event: Event
+) -> None:
+    """Run the async start_indexing function in a subprocess.
+
+    This function is designed to be run in a separate process via
+    multiprocessing. It creates a new event loop and runs the async
+    start_indexing function to completion.
+
+    Args:
+        cwd: The current working directory to index.
+        backend: Backend for file operations.
+        stop_event: Event to signal graceful shutdown.
+    """
+    asyncio.run(start_indexing(cwd=cwd, backend=backend, stop_event=stop_event))
+
+
+def spawn_indexing_process(
+    cwd: str, backend: SandboxBackendProtocol
+) -> tuple[Process, Event]:
+    """Spawn a subprocess to run the async indexing operation.
+
+    Args:
+        cwd: The current working directory to index.
+        backend: Backend for file operations.
+
+    Returns:
+        Tuple of (Process, Event) where Event can be set to signal graceful shutdown.
+    """
+    logger.info(f"Spawning indexing process for {cwd}")
+
+    stop_event = EventFactory()
+    process = Process(
+        target=_run_indexing_subprocess,
+        args=(cwd, backend, stop_event),
+    )
+    process.start()
+    return process, stop_event

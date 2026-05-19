@@ -319,21 +319,21 @@ class IndexStore:
                 return "\n".join(lines)
 
             # short-name fallback
-            func_matches = list(
+            func_short = list(
                 s.execute(select(Function).where(Function.name == qualified_name))
                 .scalars()
                 .all()
             )
-            cls_matches = list(
+            cls_short = list(
                 s.execute(select(Class).where(Class.name == qualified_name))
                 .scalars()
                 .all()
             )
-            if func_matches or cls_matches:
+            if func_short or cls_short:
                 lines = [f"No exact match for '{qualified_name}'. Did you mean:"]
-                for f in func_matches[:10]:
+                for f in func_short[:10]:
                     lines.append(f"  {f.qualified_name} (function)")
-                for c in cls_matches[:10]:
+                for c in cls_short[:10]:
                     lines.append(f"  {c.qualified_name} (class)")
                 return "\n".join(lines)
 

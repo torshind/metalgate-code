@@ -4,8 +4,8 @@ Agent factory for creating Deep Agent instances based on session context.
 
 import logging
 import os
-from functools import partial
 from pathlib import Path
+from typing import Callable
 
 from deepagents import create_deep_agent
 from deepagents.backends import (
@@ -72,20 +72,34 @@ def _build_agent(
     cwd = context.cwd
     # Load project tool skills
     logger.info("Loading tool skills from %s", cwd)
-    registry.load(cwd)
+    registry.load(cwd, backend=shell_backend)
     # Load project MCP tools
     logger.info("Loading MCP tools from %s", cwd)
-    registry_mcp.load(cwd)
+    registry_mcp.load(cwd, backend=shell_backend)
 
     interrupt_config = get_interrupt_config(context.mode)
 
     # Load AGENTS.md if it exists and add to system prompt
     agents_md_path = Path(cwd) / ".metalgate" / "AGENTS.md"
     agents_md_content = ""
-    if os.path.isfile(agents_md_path):
+    file_exists = False
+    if shell_backend:
         try:
-            with open(agents_md_path, "r", encoding="utf-8") as f:
-                agents_md_content = f.read()
+            result = shell_backend.execute(f"test -f {agents_md_path} && echo 'exists'")
+            file_exists = "exists" in result.output
+        except Exception:
+            pass
+    else:
+        file_exists = os.path.isfile(agents_md_path)
+
+    if file_exists:
+        try:
+            if shell_backend:
+                result = shell_backend.execute(f"cat {agents_md_path}")
+                agents_md_content = result.output
+            else:
+                with open(agents_md_path, "r", encoding="utf-8") as f:
+                    agents_md_content = f.read()
         except (OSError, IOError):
             pass  # Silently ignore file read errors
 
@@ -163,6 +177,15 @@ def _build_agent(
     )
 
 
-def create_agent() -> partial:
-    """Create a partial _build_agent function with project-specific checkpointer."""
-    return partial(_build_agent)
+def create_agent() -> Callable[
+    [AgentSessionContext, SandboxBackendProtocol | None], CompiledStateGraph
+]:
+    """Create a factory function that accepts (context, backend) and returns a compiled agent."""
+
+    def factory(
+        context: AgentSessionContext,
+        shell_backend: SandboxBackendProtocol | None = None,
+    ) -> CompiledStateGraph:
+        return _build_agent(context, shell_backend=shell_backend)
+
+    return factory

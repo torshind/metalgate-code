@@ -79,7 +79,10 @@ async def test_agent_reload_skills(run_sh: Path, tmp_path: Path) -> None:
     skills_path = metalgate_dir / "skills.py"
 
     # Start with an empty skills.py file
-    skills_path.write_text("")
+    test_skill_code = """
+from langchain_core.tools import tool
+"""
+    skills_path.write_text(test_skill_code)
 
     async with spawn_agent_process(
         client,
@@ -122,6 +125,7 @@ def hello_test_skill() -> str:
             ),
             timeout=300,
         )
+        await conn.close_session(session.session_id)
 
     # Verify reload_tool_skills was called
     reload_called = False

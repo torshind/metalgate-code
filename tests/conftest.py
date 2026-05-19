@@ -218,6 +218,7 @@ async def run_agent(
             ),
             timeout=timeout,
         )
+        await conn.close_session(session.session_id)
 
 
 @pytest.fixture

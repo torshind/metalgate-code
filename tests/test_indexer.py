@@ -1,8 +1,10 @@
 """Tests for context.indexer - StreamingWriter async indexer."""
 
+import os
 from pathlib import Path
 
 import pytest
+from deepagents.backends import LocalShellBackend
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -97,8 +99,16 @@ async def test_start_indexing(tmp_path: Path, fake_site: list[Path]):
     index_store = IndexStore(str(tmp_path))
     Path(index_store.db_path).unlink(missing_ok=True)
 
+    shell_env = os.environ.copy()
+    shell_backend = LocalShellBackend(
+        root_dir=tmp_path,
+        inherit_env=True,
+        env=shell_env,
+    )
+
     await start_indexing(
         cwd=str(tmp_path),
+        backend=shell_backend,
         site_roots=[str(s) for s in fake_site],
     )
 

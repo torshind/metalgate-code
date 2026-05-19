@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from multiprocessing.synchronize import Event
 from pathlib import Path
 from typing import Callable
 
@@ -50,12 +51,15 @@ class StreamingWriter:
         site_roots: list[str] | None = None,
         on_package_done: Callable[[str], None] | None = None,
         backend: SandboxBackendProtocol | None = None,
+        stop_event: Event | None = None,
     ):
+        self.cwd = cwd
         self.db_path = get_index_data_dir(cwd)
         self.python = python
         self.site_roots = site_roots
         self.on_package_done = on_package_done
         self._backend = backend
+        self._stop_event = stop_event
         self._task: asyncio.Task | None = None
 
         async_url = f"sqlite+aiosqlite:///{self.db_path}"
@@ -99,7 +103,11 @@ class StreamingWriter:
             logger.warning("No site-packages found")
             return
 
+        logger.debug(f"Found site-packages: {roots}")
+
         files = await acollect_files(self._backend, roots)
+
+        logger.debug(f"Found files: {files}")
 
         # Group by package
         by_package: dict[str, list[str]] = {}
@@ -114,17 +122,23 @@ class StreamingWriter:
         packages = sorted(by_package.keys())
         logger.info(f"Starting async indexing of {len(packages)} packages")
 
-        for pkg_name in packages:
-            pkg_files = by_package[pkg_name]
-            await self._write_package(pkg_name, pkg_files, roots)
+        try:
+            for pkg_name in packages:
+                if self._stop_event and self._stop_event.is_set():
+                    logger.info("Indexing stopped by signal")
+                    break
+                pkg_files = by_package[pkg_name]
+                await self._write_package(pkg_name, pkg_files, roots)
 
-            if self.on_package_done:
-                try:
-                    self.on_package_done(pkg_name)
-                except Exception:
-                    pass
+                if self.on_package_done:
+                    try:
+                        self.on_package_done(pkg_name)
+                    except Exception:
+                        pass
 
-        logger.info("Async indexing complete")
+            logger.info("Async indexing complete")
+        finally:
+            await self._engine.dispose()
 
     def _guess_package(self, file: str | Path, roots: list[str]) -> str:
         """Guess package name from file path."""

@@ -71,16 +71,15 @@ async def run_agent_with_memory(
                 session_id=session.session_id,
                 value="evroc:moonshotai/Kimi-K2.5",
             )
-
-        await asyncio.wait_for(
-            conn.prompt(
-                session_id=session.session_id,
-                prompt=[text_block(prompt)],
-            ),
-            timeout=timeout,
-        )
-
-        return session.session_id
+            await asyncio.wait_for(
+                conn.prompt(
+                    session_id=session.session_id,
+                    prompt=[text_block(prompt)],
+                ),
+                timeout=timeout,
+            )
+            await conn.close_session(session.session_id)
+            return session.session_id
 
 
 @pytest.mark.asyncio
