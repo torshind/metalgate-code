@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from multiprocessing.synchronize import Event
 from pathlib import Path
 from typing import Callable
 
@@ -51,7 +50,6 @@ class StreamingWriter:
         site_roots: list[str] | None = None,
         on_package_done: Callable[[str], None] | None = None,
         backend: SandboxBackendProtocol | None = None,
-        stop_event: Event | None = None,
     ):
         self.cwd = cwd
         self.db_path = get_index_data_dir(cwd)
@@ -59,7 +57,6 @@ class StreamingWriter:
         self.site_roots = site_roots
         self.on_package_done = on_package_done
         self._backend = backend
-        self._stop_event = stop_event
         self._task: asyncio.Task | None = None
 
         async_url = f"sqlite+aiosqlite:///{self.db_path}"
@@ -124,9 +121,6 @@ class StreamingWriter:
 
         try:
             for pkg_name in packages:
-                if self._stop_event and self._stop_event.is_set():
-                    logger.info("Indexing stopped by signal")
-                    break
                 pkg_files = by_package[pkg_name]
                 await self._write_package(pkg_name, pkg_files, roots)
 

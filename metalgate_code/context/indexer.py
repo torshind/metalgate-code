@@ -5,7 +5,6 @@ and writing results to the database.
 """
 
 import logging
-from multiprocessing.synchronize import Event
 from pathlib import Path
 from typing import Literal
 
@@ -132,7 +131,6 @@ async def start_indexing(
     cwd: str,
     backend: SandboxBackendProtocol,
     site_roots: list[str] | None = None,
-    stop_event: Event | None = None,
 ):
     """Start async background indexing of site-packages.
 
@@ -174,7 +172,6 @@ async def start_indexing(
         site_roots=site_roots,
         on_package_done=lambda pkg: logger.info(f"Indexed: {pkg}"),
         backend=backend,
-        stop_event=stop_event,
     )
     await _writer.start()
 

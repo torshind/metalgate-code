@@ -5,9 +5,6 @@ ACP Server factory for MetalGate Code agent.
 import asyncio
 import logging
 import os
-from multiprocessing import Event as EventFactory
-from multiprocessing import Process
-from multiprocessing.synchronize import Event
 from typing import Any, Callable
 
 from acp.helpers import (
@@ -48,7 +45,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph.state import CompiledStateGraph
 
-from metalgate_code.context.indexer import start_indexing
+from metalgate_code.context.indexer import start_indexing, stop_indexing
 from metalgate_code.helpers import get_checkpoints_data_dir
 
 logger = logging.getLogger("metalgate_code")
@@ -77,8 +74,7 @@ class MetalGateACP(AgentServerACP):
         self._user_agent_factory = agent_factory
         self._backend_factory = backend_factory
         self._shell_backend: SandboxBackendProtocol
-        self._indexer_process: Process | None = None
-        self._indexer_stop_event: Event | None = None
+        self._indexer_task: asyncio.Task | None = None
         # Pass wrapper as the agent to the base class
         super().__init__(agent=self._create_agent, modes=modes, models=models)
 
@@ -109,9 +105,13 @@ class MetalGateACP(AgentServerACP):
         )
 
     def _setup_session(self, cwd: str) -> None:
+        if self._indexer_task is not None and not self._indexer_task.done():
+            logger.info("Indexer already running, not starting again")
+            self._shell_backend = self._backend_factory(cwd)
+            return
         self._shell_backend = self._backend_factory(cwd)
-        self._indexer_process, self._indexer_stop_event = spawn_indexing_process(
-            cwd, self._shell_backend
+        self._indexer_task = asyncio.create_task(
+            start_indexing(cwd=cwd, backend=self._shell_backend)
         )
 
     async def new_session(
@@ -275,23 +275,10 @@ class MetalGateACP(AgentServerACP):
     ) -> CloseSessionResponse | None:
         logger.info(f"Closing session {session_id}")
 
-        # Signal the indexer to stop gracefully
-        if self._indexer_stop_event is not None:
-            logger.info("Signaling indexer to stop")
-            self._indexer_stop_event.set()
-
-        # Wait for the indexer process to finish
-        if self._indexer_process is not None and self._indexer_process.is_alive():
-            logger.info("Waiting for indexer process to finish")
-            self._indexer_process.join(timeout=10)
-            if self._indexer_process.is_alive():
-                logger.warning("Indexer process did not stop in time, terminating")
-                self._indexer_process.terminate()
-                self._indexer_process.join(timeout=5)
+        await stop_indexing()
 
         # Reset state
-        self._indexer_process = None
-        self._indexer_stop_event = None
+        self._indexer_task = None
 
         return await super().close_session(session_id, **kwargs)
 
@@ -437,43 +424,3 @@ class MetalGateACP(AgentServerACP):
         # Note: checkpointer is closed when exiting the context
         self._agent.checkpointer = None
         return result
-
-
-def _run_indexing_subprocess(
-    cwd: str, backend: SandboxBackendProtocol, stop_event: Event
-) -> None:
-    """Run the async start_indexing function in a subprocess.
-
-    This function is designed to be run in a separate process via
-    multiprocessing. It creates a new event loop and runs the async
-    start_indexing function to completion.
-
-    Args:
-        cwd: The current working directory to index.
-        backend: Backend for file operations.
-        stop_event: Event to signal graceful shutdown.
-    """
-    asyncio.run(start_indexing(cwd=cwd, backend=backend, stop_event=stop_event))
-
-
-def spawn_indexing_process(
-    cwd: str, backend: SandboxBackendProtocol
-) -> tuple[Process, Event]:
-    """Spawn a subprocess to run the async indexing operation.
-
-    Args:
-        cwd: The current working directory to index.
-        backend: Backend for file operations.
-
-    Returns:
-        Tuple of (Process, Event) where Event can be set to signal graceful shutdown.
-    """
-    logger.info(f"Spawning indexing process for {cwd}")
-
-    stop_event = EventFactory()
-    process = Process(
-        target=_run_indexing_subprocess,
-        args=(cwd, backend, stop_event),
-    )
-    process.start()
-    return process, stop_event
