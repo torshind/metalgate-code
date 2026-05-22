@@ -93,6 +93,7 @@ def _build_agent(
         file_exists = os.path.isfile(agents_md_path)
 
     if file_exists:
+        logging.info(f"Loading AGENTS.md from {agents_md_path}")
         try:
             if shell_backend:
                 result = shell_backend.execute(f"cat {agents_md_path}")
@@ -100,6 +101,7 @@ def _build_agent(
             else:
                 with open(agents_md_path, "r", encoding="utf-8") as f:
                     agents_md_content = f.read()
+            logging.info(f"Loaded {len(agents_md_content)} bytes from AGENTS.md")
         except (OSError, IOError):
             pass  # Silently ignore file read errors
 

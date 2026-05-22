@@ -29,8 +29,10 @@ def get_mem0_config() -> dict[str, Any]:
     """
     api_key = os.environ.get("MODEL_API_KEY", "")
     embedder_api_key = os.environ.get("EMBEDDER_API_KEY", "")
-    mem_model = os.environ.get("MEM_MODEL", "moonshotai/Kimi-K2.5")
-    temperature = os.environ.get("TEMPERATURE", 0.6)
+    mem_model = os.environ.get("MEM_MODEL", "google/gemma-4-26B-A4B-it")
+    temperature = os.environ.get("TEMPERATURE", 1.0)
+    top_p = os.environ.get("TOP_P", 0.95)
+    top_k = os.environ.get("TOP_K", 64)
     embedder_model = os.environ.get("MEM_EMBEDDER_MODEL", "Qwen/Qwen3-Embedding-8B")
 
     config: dict[str, Any] = {
@@ -41,6 +43,8 @@ def get_mem0_config() -> dict[str, Any]:
                 "model": mem_model,
                 "openai_base_url": EVROC_BASE_URL,
                 "temperature": temperature,
+                "top_p": top_p,
+                "top_k": top_k,
             },
         },
         "embedder": {
@@ -91,12 +95,12 @@ def fetch_models() -> list[dict[str, str]]:
 
 
 @no_type_check
-def create_chat_model(model_id: str = "evroc:moonshotai/Kimi-K2.5") -> ChatOpenAI:
+def create_chat_model(model_id: str = "evroc:moonshotai/Kimi-K2.6") -> ChatOpenAI:
     """
     Create a LangChain ChatOpenAI instance for Evroc models.
 
     Args:
-        model_id: Model identifier with 'evroc:' prefix. Defaults to 'evroc:moonshotai/Kimi-K2.5'.
+        model_id: Model identifier with 'evroc:' prefix. Defaults to 'evroc:moonshotai/Kimi-K2.6'.
 
     Returns:
         Configured ChatOpenAI instance for the Evroc API.

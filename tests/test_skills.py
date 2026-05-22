@@ -97,7 +97,7 @@ from langchain_core.tools import tool
         await conn.set_config_option(
             config_id="model",
             session_id=session.session_id,
-            value="evroc:moonshotai/Kimi-K2.5",
+            value="evroc:moonshotai/Kimi-K2.6",
         )
 
         # FIRST: Write the skill file while agent is running

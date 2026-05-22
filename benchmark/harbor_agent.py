@@ -19,7 +19,7 @@ logger = logging.getLogger("metalgate_code")
 
 
 class HarborAgent(BaseAgent):
-    def __init__(self, model_name: str = "evroc:moonshotai/Kimi-K2.5", **kwargs):
+    def __init__(self, model_name: str = "evroc:moonshotai/Kimi-K2.6", **kwargs):
         self._model_name = model_name
         super().__init__(model_name=model_name, **kwargs)
 
