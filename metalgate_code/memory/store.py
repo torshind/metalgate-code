@@ -11,7 +11,7 @@ from mem0 import AsyncMemory
 from metalgate_code.memory.config import (
     DEFAULT_EPISODIC_LIMIT,
 )
-from metalgate_code.memory.paths import get_memory_data_dir
+from metalgate_code.helpers.paths import get_memory_data_dir
 from metalgate_code.models.provider import get_mem0_config
 
 # Singleton cache: (cwd, user_id) -> MemoryStore

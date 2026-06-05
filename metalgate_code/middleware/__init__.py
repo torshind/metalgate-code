@@ -10,6 +10,7 @@ from metalgate_code.middleware.tool_skills import ToolSkillsMiddleware
 __all__ = [
     "CollectorMiddleware",
     "DynamicToolsMiddleware",
+    "PythonContextMiddleware",
     "RecollectorMiddleware",
     "ToolSkillsMiddleware",
 ]

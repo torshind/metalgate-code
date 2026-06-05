@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 from acp.schema import ToolCallStart
-from conftest import RecordingClient, run_agent
+
+from tests.conftest import RecordingClient, run_agent
 
 logger = logging.getLogger("acp_test")
 
@@ -39,7 +40,9 @@ def list_all_files(path: str) -> Tuple[int, str]:
     Returns a tuple of (returncode, output)."""
     return _run(f"ls -al {path}")
 '''
-    skills_path = client.temp_dir / "skills.py"
+    metalgate_dir = client.temp_dir / ".metalgate"
+    metalgate_dir.mkdir(exist_ok=True)
+    skills_path = metalgate_dir / "skills.py"
     skills_path.write_text(test_skill_code)
 
     await run_agent(
@@ -71,10 +74,15 @@ async def test_agent_reload_skills(run_sh: Path, tmp_path: Path) -> None:
     from acp import spawn_agent_process, text_block
 
     client = RecordingClient(prefix="acp_skills_test_")
-    skills_path = client.temp_dir / "skills.py"
+    metalgate_dir = client.temp_dir / ".metalgate"
+    metalgate_dir.mkdir(exist_ok=True)
+    skills_path = metalgate_dir / "skills.py"
 
     # Start with an empty skills.py file
-    skills_path.write_text("")
+    test_skill_code = """
+from langchain_core.tools import tool
+"""
+    skills_path.write_text(test_skill_code)
 
     async with spawn_agent_process(
         client,
@@ -89,7 +97,7 @@ async def test_agent_reload_skills(run_sh: Path, tmp_path: Path) -> None:
         await conn.set_config_option(
             config_id="model",
             session_id=session.session_id,
-            value="evroc:moonshotai/Kimi-K2.5",
+            value="evroc:moonshotai/Kimi-K2.6",
         )
 
         # FIRST: Write the skill file while agent is running
@@ -117,6 +125,7 @@ def hello_test_skill() -> str:
             ),
             timeout=300,
         )
+        await conn.close_session(session.session_id)
 
     # Verify reload_tool_skills was called
     reload_called = False
@@ -149,7 +158,9 @@ from langchain_core.tools import tool
 
 
 """
-    skills_path = client.temp_dir / "skills.py"
+    metalgate_dir = client.temp_dir / ".metalgate"
+    metalgate_dir.mkdir(exist_ok=True)
+    skills_path = metalgate_dir / "skills.py"
     skills_path.write_text(test_skill_code)
 
     await run_agent(

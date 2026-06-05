@@ -209,3 +209,6 @@ __marimo__/
 # OS files
 .DS_Store
 Thumbs.db
+
+# harbor files
+jobs/

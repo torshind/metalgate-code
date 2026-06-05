@@ -12,7 +12,8 @@ from pathlib import Path
 
 import pytest
 from acp import spawn_agent_process, text_block
-from conftest import AGENT_TIMEOUT, RecordingClient, logger
+
+from tests.conftest import AGENT_TIMEOUT, RecordingClient, logger
 
 
 async def run_agent_with_memory(
@@ -68,18 +69,17 @@ async def run_agent_with_memory(
             await conn.set_config_option(
                 config_id="model",
                 session_id=session.session_id,
-                value="evroc:moonshotai/Kimi-K2.5",
+                value="evroc:moonshotai/Kimi-K2.6",
             )
-
-        await asyncio.wait_for(
-            conn.prompt(
-                session_id=session.session_id,
-                prompt=[text_block(prompt)],
-            ),
-            timeout=timeout,
-        )
-
-        return session.session_id
+            await asyncio.wait_for(
+                conn.prompt(
+                    session_id=session.session_id,
+                    prompt=[text_block(prompt)],
+                ),
+                timeout=timeout,
+            )
+            await conn.close_session(session.session_id)
+            return session.session_id
 
 
 @pytest.mark.asyncio

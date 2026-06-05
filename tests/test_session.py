@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 from acp import spawn_agent_process, text_block
 from acp.schema import ToolCallStart
-from conftest import AGENT_TIMEOUT, RecordingClient, logger
+
+from tests.conftest import AGENT_TIMEOUT, RecordingClient, logger
 
 
 async def run_agent_with_session(
@@ -44,7 +45,7 @@ async def run_agent_with_session(
             await conn.set_config_option(
                 config_id="model",
                 session_id=session_id,
-                value="evroc:moonshotai/Kimi-K2.5",
+                value="evroc:moonshotai/Kimi-K2.6",
             )
             await asyncio.wait_for(
                 conn.prompt(
@@ -53,6 +54,7 @@ async def run_agent_with_session(
                 ),
                 timeout=timeout,
             )
+            await conn.close_session(session_id)
             return session_id
         else:
             # Create new session
@@ -64,18 +66,17 @@ async def run_agent_with_session(
             await conn.set_config_option(
                 config_id="model",
                 session_id=session.session_id,
-                value="evroc:moonshotai/Kimi-K2.5",
+                value="evroc:moonshotai/Kimi-K2.6",
             )
-
-        await asyncio.wait_for(
-            conn.prompt(
-                session_id=session.session_id,
-                prompt=[text_block(prompt)],
-            ),
-            timeout=timeout,
-        )
-
-        return session.session_id
+            await asyncio.wait_for(
+                conn.prompt(
+                    session_id=session.session_id,
+                    prompt=[text_block(prompt)],
+                ),
+                timeout=timeout,
+            )
+            await conn.close_session(session.session_id)
+            return session.session_id
 
 
 @pytest.mark.asyncio
@@ -259,6 +260,30 @@ async def test_session_replays_tool_calls(run_sh: Path) -> None:
     are replayed as ToolCallStart notifications.
     """
     client_play = RecordingClient(prefix="acp_session_test_")
+
+    test_skill_code = '''
+import subprocess
+from typing import Tuple
+
+from langchain_core.tools import tool
+
+
+def _run(cmd: str) -> Tuple[int, str]:
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+    output = (result.stdout + result.stderr).strip()
+    return (result.returncode, (output or f"exited {result.returncode}"))
+
+
+@tool
+def list_all_files(path: str) -> Tuple[int, str]:
+    """List all files and directories at the given path.
+    Returns a tuple of (returncode, output)."""
+    return _run(f"ls -al {path}")
+'''
+    metalgate_dir = client_play.temp_dir / ".metalgate"
+    metalgate_dir.mkdir(exist_ok=True)
+    skills_path = metalgate_dir / "skills.py"
+    skills_path.write_text(test_skill_code)
 
     # First interaction - ask agent to list files (should trigger a tool call)
     session_id = await run_agent_with_session(

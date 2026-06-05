@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
+from deepagents.backends.protocol import SandboxBackendProtocol
 from langchain_core.documents.base import Blob
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -103,24 +104,45 @@ class RegistryMCP(MultiServerMCPClient):
         self._tools: list[BaseTool] = []
         self._resources: list[Blob] = []
         self._config_path: Path | None = None
+        self._backend: SandboxBackendProtocol | None = None
 
-    async def aload(self, project_path: str | Path):
+    async def aload(
+        self, project_path: str | Path, backend: SandboxBackendProtocol | None = None
+    ):
         """Initialize the registry by loading config and connecting to servers."""
         self._config_path = Path(project_path) / "mcp.yaml"
-        if self._config_path.exists():
+        self._backend = backend
+        if self._path_exists(self._config_path):
             logger.info(f"Loading MCP tools from {self._config_path}")
             await self.areload()
         else:
             logger.info(f"No mcp.yaml found at {self._config_path}")
 
-    def load(self, project_path: str | Path):
+    def load(
+        self, project_path: str | Path, backend: SandboxBackendProtocol | None = None
+    ):
         """Initialize the registry by loading config and connecting to servers."""
-        self._config_path = Path(project_path) / "mcp.yaml"
-        if self._config_path.exists():
+        self._config_path = Path(project_path) / ".metalgate" / "mcp.yaml"
+        self._backend = backend
+        if self._path_exists(self._config_path):
             logger.info(f"Loading MCP tools from {self._config_path}")
             self.reload()
         else:
             logger.info(f"No mcp.yaml found at {self._config_path}")
+
+    def _path_exists(self, path: Path) -> bool:
+        """Check if path exists, using backend if available."""
+        if self._backend is not None:
+            result = self._backend.execute(f"test -f {path} && echo 'exists'")
+            return "exists" in result.output
+        return path.exists()
+
+    def _read_text(self, path: Path) -> str:
+        """Read file text, using backend if available."""
+        if self._backend is not None:
+            result = self._backend.execute(f"cat {path}")
+            return result.output
+        return path.read_text()
 
     def _load_config(self) -> dict:
         """Load server connections from the YAML config file."""
@@ -129,7 +151,7 @@ class RegistryMCP(MultiServerMCPClient):
             return connections
 
         try:
-            config = yaml.safe_load(self._config_path.read_text()) or {}
+            config = yaml.safe_load(self._read_text(self._config_path)) or {}
             servers = config.get("servers", {})
 
             for name, cfg in servers.items():
@@ -183,9 +205,9 @@ class RegistryMCP(MultiServerMCPClient):
 
     def _load_config_dict(self) -> dict:
         """Load the raw config dict from file."""
-        if self._config_path is None or not self._config_path.exists():
+        if self._config_path is None or not self._path_exists(self._config_path):
             return {}
-        return yaml.safe_load(self._config_path.read_text()) or {}
+        return yaml.safe_load(self._read_text(self._config_path)) or {}
 
     def _save_config_dict(self, config: dict) -> None:
         """Save config dict to file."""

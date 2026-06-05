@@ -4,7 +4,7 @@ ACP Server factory for MetalGate Code agent.
 
 import logging
 import os
-from typing import Any
+from typing import Any, Callable
 
 from acp.helpers import (
     start_tool_call,
@@ -16,6 +16,7 @@ from acp.helpers import (
 from acp.schema import (
     AgentCapabilities,
     AudioContentBlock,
+    CloseSessionResponse,
     EmbeddedResourceContentBlock,
     HttpMcpServer,
     ImageContentBlock,
@@ -23,6 +24,7 @@ from acp.schema import (
     ListSessionsResponse,
     LoadSessionResponse,
     McpServerStdio,
+    NewSessionResponse,
     PromptCapabilities,
     PromptResponse,
     ResourceContentBlock,
@@ -34,19 +36,48 @@ from acp.schema import (
     SseMcpServer,
     TextContentBlock,
 )
-from deepagents_acp.server import AgentServerACP
+from deepagents.backends.protocol import SandboxBackendProtocol
+from deepagents_acp.server import AgentServerACP, AgentSessionContext
 from deepagents_cli.sessions import _patch_aiosqlite
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.graph.state import CompiledStateGraph
 
-from metalgate_code.memory import get_db_path
+from metalgate_code.helpers import get_checkpoints_data_dir
 
 logger = logging.getLogger("metalgate_code")
 
 
 class MetalGateACP(AgentServerACP):
     """Custom ACP server with AsyncSqliteSaver checkpointer."""
+
+    def __init__(
+        self,
+        agent_factory: Callable[
+            [AgentSessionContext, SandboxBackendProtocol | None], CompiledStateGraph
+        ],
+        backend_factory: Callable[[str], SandboxBackendProtocol],
+        modes: Any,
+        models: Any,
+    ) -> None:
+        """Initialize with agent factory and backend factory.
+
+        Args:
+            agent_factory: Function that takes (context, backend) and returns CompiledStateGraph
+            backend_factory: Function that takes cwd and returns SandboxBackendProtocol
+            modes: Session modes configuration
+            models: Available models list
+        """
+        self._user_agent_factory = agent_factory
+        self._backend_factory = backend_factory
+        self._shell_backend: SandboxBackendProtocol
+        # Pass wrapper as the agent to the base class
+        super().__init__(agent=self._create_agent, modes=modes, models=models)
+
+    def _create_agent(self, context: AgentSessionContext) -> CompiledStateGraph:
+        """Called by base class to create the agent for a session."""
+        return self._user_agent_factory(context, self._shell_backend)
 
     async def initialize(
         self,
@@ -70,6 +101,24 @@ class MetalGateACP(AgentServerACP):
             ),
         )
 
+    def _setup_session(self, cwd: str, session_id: str) -> None:
+        self._shell_backend = self._backend_factory(cwd)
+        if self._agent is None:
+            self._reset_agent(session_id)
+
+    async def new_session(
+        self,
+        cwd: str,
+        mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
+        **kwargs: Any,  # noqa: ARG002  # ACP protocol interface parameter
+    ) -> NewSessionResponse:
+        logger.info(f"Creating new session for cwd {cwd}")
+
+        response = await super().new_session(cwd, mcp_servers, **kwargs)
+        self._setup_session(cwd, response.session_id)
+
+        return response
+
     async def list_sessions(
         self,
         cursor: str | None = None,
@@ -82,7 +131,7 @@ class MetalGateACP(AgentServerACP):
 
         # Use provided cwd or current working directory
         target_cwd = cwd or self._cwd or os.getcwd()
-        db_path = get_db_path(target_cwd)
+        db_path = get_checkpoints_data_dir(target_cwd)
 
         sessions: list[SessionInfo] = []
 
@@ -119,7 +168,7 @@ class MetalGateACP(AgentServerACP):
         """Check if a session exists in the checkpointer database."""
 
         _patch_aiosqlite()
-        db_path = get_db_path(cwd)
+        db_path = get_checkpoints_data_dir(cwd)
 
         if not db_path.exists():
             return False
@@ -132,7 +181,7 @@ class MetalGateACP(AgentServerACP):
             ) as cursor:
                 return await cursor.fetchone() is not None
 
-    async def _setup_session(
+    async def _restore_session(
         self,
         session_id: str,
         cwd: str,
@@ -145,12 +194,12 @@ class MetalGateACP(AgentServerACP):
         Returns:
             Tuple of (modes, config_options) to use in the response.
         """
+        self._setup_session(cwd, session_id=session_id)
+
         # Verify session exists
         exists = await self._session_exists(session_id, cwd)
         if not exists:
-            logger.warning(
-                "Session %s not found in database for cwd %s", session_id, cwd
-            )
+            logger.warning(f"Session {session_id} not found in database for cwd {cwd}")
 
         # Store session context - cwd comes from client
         self._session_cwds[session_id] = cwd
@@ -185,9 +234,9 @@ class MetalGateACP(AgentServerACP):
         Verifies the session exists in the checkpointer before returning.
         The cwd is provided by the client and used as-is.
         """
-        logger.info("Loading session %s for cwd %s", session_id, cwd)
+        logger.info(f"Loading session {session_id} for cwd {cwd}")
 
-        modes, config_options = await self._setup_session(session_id, cwd)
+        modes, config_options = await self._restore_session(session_id, cwd)
 
         return LoadSessionResponse(
             modes=modes,
@@ -206,21 +255,28 @@ class MetalGateACP(AgentServerACP):
         Verifies the session exists in the checkpointer before returning.
         The cwd is provided by the client and used as-is.
         """
-        logger.info("Resuming session %s for cwd %s", session_id, cwd)
+        logger.info(f"Resuming session {session_id} for cwd {cwd}")
 
-        modes, config_options = await self._setup_session(session_id, cwd)
+        modes, config_options = await self._restore_session(session_id, cwd)
 
         return ResumeSessionResponse(
             modes=modes,
             config_options=config_options,
         )
 
+    async def close_session(
+        self, session_id: str, **kwargs: Any
+    ) -> CloseSessionResponse | None:
+        logger.info(f"Closing session {session_id}")
+
+        return await super().close_session(session_id, **kwargs)
+
     async def _replay_chat_history(self, session_id: str, cwd: str) -> None:
         """Replay chat history by sending session_update notifications."""
 
         _patch_aiosqlite()
 
-        db_path = get_db_path(cwd)
+        db_path = get_checkpoints_data_dir(cwd)
         if not db_path.exists():
             return
 
@@ -239,7 +295,7 @@ class MetalGateACP(AgentServerACP):
                 messages = channel_values.get("messages", [])
 
                 logger.info(
-                    "Replaying %d messages for session %s", len(messages), session_id
+                    f"Replaying {len(messages)} messages for session {session_id}"
                 )
 
                 # Replay each message as a session update
@@ -247,7 +303,7 @@ class MetalGateACP(AgentServerACP):
                     await self._send_message_chunk(session_id, msg)
 
         except Exception as e:
-            logger.warning("Error replaying chat history: %s", e)
+            logger.warning(f"Error replaying chat history: {e}")
 
     def _extract_text_from_content(self, content: Any) -> str | None:
         """Extract text from content which may be a string or list of blocks."""
@@ -272,7 +328,7 @@ class MetalGateACP(AgentServerACP):
             elif isinstance(msg, ToolMessage):
                 await self._send_tool_message(session_id, msg)
         except Exception as e:
-            logger.warning("Error sending message chunk: %s", e)
+            logger.warning(f"Error sending message chunk: {e}")
 
     async def _send_human_message(self, session_id: str, msg: HumanMessage) -> None:
         text = self._extract_text_from_content(msg.content)
@@ -328,6 +384,7 @@ class MetalGateACP(AgentServerACP):
         **kwargs: Any,
     ) -> PromptResponse:
         """Process a user prompt with AsyncSqliteSaver checkpointer."""
+        logger.debug(f"Prompting session {session_id} with prompt {prompt}")
 
         _patch_aiosqlite()
 
@@ -341,12 +398,10 @@ class MetalGateACP(AgentServerACP):
         # Use the cwd associated with this session (stored at load/resume time)
         # Fall back to current cwd if session not found
         session_cwd = self._session_cwds.get(session_id, self._cwd)
-        db_path = get_db_path(session_cwd)
+        db_path = get_checkpoints_data_dir(session_cwd)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         logger.info(
-            "Opening AsyncSqliteSaver checkpointer at %s for session %s",
-            db_path,
-            session_id,
+            f"Opening AsyncSqliteSaver checkpointer at {db_path} for session {session_id}"
         )
 
         # from_conn_string is an async context manager
