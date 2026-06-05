@@ -48,7 +48,7 @@ def list_all_files(path: str) -> Tuple[int, str]:
     await run_agent(
         client,
         run_sh,
-        "Use tool skills to list all files in the current directory.",
+        "Use list_all_files tool skill to list all files in the current directory.",
     )
 
     success = False
@@ -98,6 +98,11 @@ from langchain_core.tools import tool
             config_id="model",
             session_id=session.session_id,
             value="evroc:moonshotai/Kimi-K2.6",
+        )
+        await conn.set_config_option(
+            config_id="mode",
+            session_id=session.session_id,
+            value="accept_everything",
         )
 
         # FIRST: Write the skill file while agent is running

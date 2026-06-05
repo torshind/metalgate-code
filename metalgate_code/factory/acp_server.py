@@ -38,7 +38,7 @@ from acp.schema import (
 )
 from deepagents.backends.protocol import SandboxBackendProtocol
 from deepagents_acp.server import AgentServerACP, AgentSessionContext
-from deepagents_cli.sessions import _patch_aiosqlite
+from deepagents_code.sessions import _patch_aiosqlite
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -121,6 +121,7 @@ class MetalGateACP(AgentServerACP):
 
     async def list_sessions(
         self,
+        additional_directories: list[str] | None = None,
         cursor: str | None = None,
         cwd: str | None = None,
         **kwargs: Any,
@@ -226,6 +227,7 @@ class MetalGateACP(AgentServerACP):
         self,
         cwd: str,
         session_id: str,
+        additional_directories: list[str] | None = None,
         mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
         **kwargs: Any,
     ) -> LoadSessionResponse:
@@ -247,6 +249,7 @@ class MetalGateACP(AgentServerACP):
         self,
         cwd: str,
         session_id: str,
+        additional_directories: list[str] | None = None,
         mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
         **kwargs: Any,
     ) -> ResumeSessionResponse:
@@ -282,17 +285,16 @@ class MetalGateACP(AgentServerACP):
 
         try:
             async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
-                # Get the checkpoint tuple for this thread
+                # Attach the checkpointer so aget_state can reconstruct
+                # DeltaChannel values (e.g., messages) that are not stored
+                # directly in channel_values for non-snapshot steps.
+                # _setup_session guarantees self._agent is not None.
+                assert self._agent is not None
+                self._agent.checkpointer = checkpointer
+
                 config: RunnableConfig = {"configurable": {"thread_id": session_id}}  # type: ignore[dict-item]
-                tuple_result = await checkpointer.aget_tuple(config)
-
-                if tuple_result is None or tuple_result.checkpoint is None:
-                    return
-
-                # Get messages from the checkpoint state
-                checkpoint = tuple_result.checkpoint
-                channel_values = checkpoint.get("channel_values", {})
-                messages = channel_values.get("messages", [])
+                state_snapshot = await self._agent.aget_state(config)
+                messages = state_snapshot.values.get("messages", []) if isinstance(state_snapshot.values, dict) else []
 
                 logger.info(
                     f"Replaying {len(messages)} messages for session {session_id}"

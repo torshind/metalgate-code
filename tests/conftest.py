@@ -211,6 +211,11 @@ async def run_agent(
             session_id=session.session_id,
             value="evroc:moonshotai/Kimi-K2.6",
         )
+        await conn.set_config_option(
+            config_id="mode",
+            session_id=session.session_id,
+            value="accept_everything",
+        )
         await asyncio.wait_for(
             conn.prompt(
                 session_id=session.session_id,

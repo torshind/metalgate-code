@@ -289,7 +289,7 @@ def list_all_files(path: str) -> Tuple[int, str]:
     session_id = await run_agent_with_session(
         client_play,
         run_sh,
-        "Use a tool skill to list files in the current directory.",
+        "Use list_all_files tool skill to list files in the current directory.",
     )
 
     logger.info("First interaction output:\n%s", client_play.all_text)

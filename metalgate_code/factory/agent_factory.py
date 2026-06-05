@@ -15,7 +15,7 @@ from deepagents.backends import (
 )
 from deepagents.backends.protocol import SandboxBackendProtocol
 from deepagents_acp.server import AgentSessionContext
-from deepagents_cli.local_context import LocalContextMiddleware
+from deepagents_code.local_context import LocalContextMiddleware
 from langgraph.graph.state import CompiledStateGraph
 
 from metalgate_code.config import get_interrupt_config
