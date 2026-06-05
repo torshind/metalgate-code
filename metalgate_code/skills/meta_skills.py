@@ -84,6 +84,7 @@ def create_tool_skill(
     # 3. Check for duplicate function name
     skills_path = registry.skills_path
     if not skills_path.exists():
+        skills_path.mkdir(parents=True, exist_ok=True)
         skills_path.write_text("from langchain_core.tools import tool\n")
 
     existing_source = skills_path.read_text()

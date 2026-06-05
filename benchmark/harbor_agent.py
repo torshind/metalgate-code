@@ -1,0 +1,75 @@
+import logging
+from pathlib import Path
+
+from deepagents_acp.server import AgentSessionContext
+from harbor import AgentContext, BaseAgent, BaseEnvironment
+
+from benchmark.backend import HarborSandbox
+from metalgate_code.factory.agent_factory import _build_agent
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("/tmp/agent_debug.log", mode="w"),
+    ],
+)
+logger = logging.getLogger("metalgate_code")
+
+
+class HarborAgent(BaseAgent):
+    def __init__(self, model_name: str = "evroc:moonshotai/Kimi-K2.6", **kwargs):
+        self._model_name = model_name
+        super().__init__(model_name=model_name, **kwargs)
+
+    @staticmethod
+    def name() -> str:
+        return "metalgate"
+
+    def version(self) -> str | None:
+        return "0.1.0"
+
+    async def setup(self, environment: BaseEnvironment) -> None:
+        pass
+
+    async def run(
+        self,
+        instruction: str,
+        environment: BaseEnvironment,
+        context: AgentContext,
+    ) -> None:
+        # HarborSandbox wraps Harbor's environment into DeepAgents' BackendProtocol
+        backend = HarborSandbox(environment)
+
+        cwd = (await environment.exec("pwd")).stdout
+        if cwd:
+            cwd = cwd.strip()
+
+        if cwd:
+            logger.info(f"cwd: {cwd}")
+        else:
+            logger.info("Warning: pwd failed")
+
+        await environment.exec(f"mkdir -p {cwd}/.metalgate")
+        await environment.upload_file(
+            source_path=Path("benchmark/skills.py"),
+            target_path=f"{cwd}/.metalgate/skills.py",
+        )
+
+        session_context = AgentSessionContext(
+            cwd=cwd if cwd else "/testbed",
+            mode="accept_everything",
+            model=self._model_name,
+        )
+
+        agent = _build_agent(session_context, backend)
+
+        log_file = self.logs_dir / "agent.txt"
+
+        with open(log_file, "w") as f:
+            async for chunk in agent.astream(
+                {"messages": [{"role": "user", "content": instruction}]}
+            ):
+                line = str(chunk)
+                f.write(line + "\n")
+                f.flush()
