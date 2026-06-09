@@ -49,13 +49,15 @@ AGENT_TIMEOUT = 300
 class RecordingClient(Client):
     """ACP client that records updates and auto-approves permissions with a temp working directory."""
 
-    def __init__(self, prefix: str = "acp_test_") -> None:
+    def __init__(self, prefix: str = "acp_test_", auto_approve: bool = True) -> None:
         self.prefix = prefix
         self.temp_dir: Path = Path(tempfile.mkdtemp(prefix=self.prefix))
         self.updates: list[Any] = []
         self.written_files: list[str] = []
         self.approved_options: list[str] = []
         self.denied_requests: list[str] = []
+        self.permission_requests: list[dict[str, Any]] = []
+        self.auto_approve = auto_approve
 
     def __enter__(self) -> Self:
         return self
@@ -74,17 +76,22 @@ class RecordingClient(Client):
 
     @param_model(RequestPermissionRequest)
     async def request_permission(self, options, session_id, tool_call, **kwargs):
+        title = getattr(tool_call, "title", None) or "<unknown>"
+        self.permission_requests.append({
+            "title": title,
+            "options": [getattr(o, "kind", o) for o in options],
+        })
         allow_option = next(
             (o for o in options if o.kind in ("allow_once", "allow_always")), None
         )
-        if allow_option:
+        if allow_option and self.auto_approve:
             self.approved_options.append(allow_option.option_id)
             return RequestPermissionResponse(
                 outcome=AllowedOutcome(
                     outcome="selected", option_id=allow_option.option_id
                 )
             )
-        self.denied_requests.append(getattr(tool_call, "name", "<unknown>"))
+        self.denied_requests.append(title)
         return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
 
     @param_model(SessionNotification)
@@ -187,11 +194,16 @@ def run_sh() -> Generator[Path, None, None]:
 
 
 async def run_agent(
-    client: RecordingClient, run_sh: Path, prompt: str, timeout: int = AGENT_TIMEOUT
+    client: RecordingClient,
+    run_sh: Path,
+    prompt: str,
+    timeout: int = AGENT_TIMEOUT,
+    mode: str = "accept_everything",
 ) -> None:
     """Spawn the agent, run a single prompt, and wait for it to finish.
 
-    Returns the session_id used for the session.
+    Args:
+        mode: Session mode to use (default "accept_everything").
     """
     logger.info("Starting agent: %s", run_sh)
     async with spawn_agent_process(
@@ -214,7 +226,7 @@ async def run_agent(
         await conn.set_config_option(
             config_id="mode",
             session_id=session.session_id,
-            value="accept_everything",
+            value=mode,
         )
         await asyncio.wait_for(
             conn.prompt(

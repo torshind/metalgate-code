@@ -93,6 +93,118 @@ async def test_agent_edits_file(run_sh: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_asks_before_edits_in_ask_mode(run_sh: Path) -> None:
+    """
+    In 'ask_before_edits' mode, the agent must request permission before
+    editing a file.  The client auto-approves every request, so the edit
+    should succeed and we can verify that permission requests were sent.
+    """
+    client = RecordingClient(prefix="acp_file_edit_test_", auto_approve=True)
+    target_file = create_target_file(client)
+    original_content = target_file.read_text(encoding="utf-8")
+    expected_marker = "EDITED_BY_AGENT"
+
+    await run_agent(
+        client,
+        run_sh,
+        f"Please edit the file at '{target_file}'. "
+        f"Replace the second line with the text '{expected_marker}'. "
+        "Only modify that one line and save the file.",
+        mode="ask_before_edits",
+    )
+    logger.info("Agent output:\n%s", client.all_text)
+
+    new_content = target_file.read_text(encoding="utf-8")
+
+    # File must have been modified.
+    assert new_content != original_content, (
+        f"The agent did not modify the file at all.\nAgent output:\n{client.all_text}"
+    )
+
+    # The expected marker must appear in the new content.
+    assert expected_marker in new_content, (
+        f"Expected marker '{expected_marker}' not found in file after edit.\n"
+        f"File content after run:\n{new_content}\n"
+        f"Agent output:\n{client.all_text}"
+    )
+
+    # At least one permission request must have been observed.
+    assert client.permission_requests, (
+        "No permission requests observed in ask_before_edits mode — "
+        "agent may have bypassed the permission system.\n"
+        f"Agent output:\n{client.all_text}"
+    )
+
+    # The permission request(s) must have been for an edit-related tool.
+    edit_titles = {"Edit", "Write"}
+    edit_requests = [
+        req for req in client.permission_requests
+        if any(req["title"].startswith(t) for t in edit_titles)
+    ]
+    assert edit_requests, (
+        "No edit permission request observed in ask_before_edits mode.\n"
+        f"Permission requests: {client.permission_requests}\n"
+        f"Agent output:\n{client.all_text}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_denies_edits_in_ask_mode(run_sh: Path) -> None:
+    """
+    In 'ask_before_edits' mode with auto_approve=False, permission requests
+    should arrive but be denied, leaving the file unchanged.
+    """
+    client = RecordingClient(prefix="acp_file_edit_test_", auto_approve=False)
+    target_file = create_target_file(client)
+    original_content = target_file.read_text(encoding="utf-8")
+    expected_marker = "EDITED_BY_AGENT"
+
+    await run_agent(
+        client,
+        run_sh,
+        f"Please edit the file at '{target_file}'. "
+        f"Replace the second line with the text '{expected_marker}'. "
+        "Only modify that one line and save the file.",
+        mode="ask_before_edits",
+    )
+    logger.info("Agent output:\n%s", client.all_text)
+
+    new_content = target_file.read_text(encoding="utf-8")
+
+    # File must NOT have been modified.
+    assert new_content == original_content, (
+        f"File was unexpectedly modified in ask_before_edits mode with auto_approve=False.\n"
+        f"File content after run:\n{new_content}\n"
+        f"Agent output:\n{client.all_text}"
+    )
+
+    # At least one permission request must have been observed.
+    assert client.permission_requests, (
+        "No permission requests observed in ask_before_edits mode — "
+        "agent may have bypassed the permission system.\n"
+        f"Agent output:\n{client.all_text}"
+    )
+
+    # The permission request(s) must have been for an edit-related tool.
+    edit_titles = {"Edit", "Write"}
+    edit_requests = [
+        req for req in client.permission_requests
+        if any(req["title"].startswith(t) for t in edit_titles)
+    ]
+    assert edit_requests, (
+        "No edit permission request observed in ask_before_edits mode.\n"
+        f"Permission requests: {client.permission_requests}\n"
+        f"Agent output:\n{client.all_text}"
+    )
+
+    # Verify the requests were actually denied.
+    assert client.denied_requests, (
+        "Expected at least one denied request, but none were recorded.\n"
+        f"Agent output:\n{client.all_text}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_agent_edit_preserves_encoding(run_sh: Path) -> None:
     """
     Ensure the agent writes back valid UTF-8 (no corruption from encoding
