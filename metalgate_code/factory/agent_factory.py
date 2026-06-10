@@ -14,6 +14,7 @@ from deepagents.backends import (
     StateBackend,
 )
 from deepagents.backends.protocol import SandboxBackendProtocol
+from deepagents.graph import DeepAgentState
 from deepagents_acp.server import AgentSessionContext
 from deepagents_code.local_context import LocalContextMiddleware
 from langgraph.graph.state import CompiledStateGraph
@@ -175,6 +176,7 @@ def _build_agent(
         ],
         tools=META_SKILLS + context_tools,
         system_prompt=system_prompt,
+        state_schema=DeepAgentState,
     )
 
 
