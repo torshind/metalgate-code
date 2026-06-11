@@ -229,7 +229,9 @@ def _parse_gopls_text(subcommand: str, text: str) -> list[dict]:
         elif subcommand == "call_hierarchy":
             # caller[N]: ranges L:C-EC in FILE from/to function NAME in FILE:L:C-EC
             if line.startswith("caller"):
-                func_m = re.search(r"function\s+(\w+)\s+in\s+(.+?):\d+:\d+", line)
+                func_m = re.search(
+                    r"function\s+(\w+)\s+in\s+(.+?):(\d+):(\d+)-\d+", line
+                )
                 range_m = re.search(
                     r"ranges\s+(\d+):(\d+)-\d+\s+in\s+(.+?)\s+from/to", line
                 )
@@ -240,6 +242,9 @@ def _parse_gopls_text(subcommand: str, text: str) -> list[dict]:
                             "line": int(range_m.group(1)),
                             "col": int(range_m.group(2)),
                             "name": func_m.group(1),
+                            "def_file": func_m.group(2),
+                            "def_line": int(func_m.group(3)),
+                            "def_col": int(func_m.group(4)),
                         }
                     )
     return results
@@ -295,7 +300,13 @@ def _gopls_item_to_dict(item: dict) -> dict | None:
 
     # gopls definition JSON doesn't include name/kind fields; parse from description
     if not name and description:
-        m = re.match(r"^(?:func|type|var|const)\s+(?:\([^)]+\)\s+)?(\w+)", description)
+        # Match func/type/var/const with optional receiver and optional package qualifier
+        # e.g. "func shared.ToContext(...)" -> name "ToContext"
+        # e.g. "func (o *Order) Process()" -> name "Process"
+        m = re.match(
+            r"^(?:func|type|var|const)\s+(?:\([^)]+\)\s+)?(?:[A-Za-z_]\w*\.)?(\w+)",
+            description,
+        )
         if m:
             name = m.group(1)
 
@@ -417,64 +428,61 @@ class GoTracer(Tracer):
         if col is None:
             return []
 
-        # gopls call_hierarchy plain text already shows incoming callers by default
-        items = _gopls_cmd(
-            "call_hierarchy",
-            file,
-            line,
-            col + 1,
-            cwd=str(self.root),
-        )
-        results = []
-        for item in items:
-            normalized = _gopls_item_to_dict(item)
-            if normalized is None:
+        # gopls call_hierarchy returns only direct callers. To find transitive
+        # callers (common in monorepos: shared.Func -> api.Publish -> client.Do),
+        # we BFS over the call graph starting from the target symbol.
+        seen_defs: set[tuple[str, int]] = {(file, line)}
+        seen_sites: set[tuple[str, int]] = set()
+        queue: list[tuple[str, int]] = [(file, line)]
+        results: list[dict] = []
+
+        while queue and len(results) < _MAX_CALLERS:
+            cur_file, cur_line = queue.pop(0)
+            cur_col = self._def_name_col(cur_file, cur_line)
+            if cur_col is None:
                 continue
 
-            # Use fromRanges for the actual call site if available
-            from_ranges = item.get("fromRanges", [])
-            if from_ranges:
-                for rng in from_ranges:
-                    start = rng.get("start", {})
-                    ref_file = normalized["file"]
-                    ref_line = start.get("line", 0) + 1
-                    ref_col = start.get("character", 0)
-                    if ref_file == file and ref_line == line:
-                        continue
+            items = _gopls_cmd(
+                "call_hierarchy",
+                cur_file,
+                cur_line,
+                cur_col + 1,
+                cwd=str(self.root),
+            )
+            for item in items:
+                ref_file = item.get("file", "")
+                ref_line = item.get("line", 0)
+                if not ref_file or not ref_line:
+                    continue
 
+                # Skip the definition itself
+                if ref_file == cur_file and ref_line == cur_line:
+                    continue
+
+                # Record each unique call site as a caller (direct or transitive)
+                site_key = (ref_file, ref_line)
+                if site_key not in seen_sites:
+                    seen_sites.add(site_key)
                     caller_name = self._find_enclosing_symbol(ref_file, ref_line)
                     results.append(
                         {
                             "file": ref_file,
                             "line": ref_line,
-                            "col": ref_col,
-                            "name": normalized["name"],
+                            "col": item.get("col", 0),
+                            "name": item.get("name", ""),
                             "caller": caller_name,
-                            "context": normalized.get("signature", ""),
+                            "context": "",
                         }
                     )
-                    if len(results) >= _MAX_CALLERS:
-                        break
-            else:
-                ref_file = normalized["file"]
-                ref_line = normalized["line"]
-                if ref_file == file and ref_line == line:
-                    continue
 
-                caller_name = self._find_enclosing_symbol(ref_file, ref_line)
-                results.append(
-                    {
-                        "file": ref_file,
-                        "line": ref_line,
-                        "col": normalized.get("col", 0),
-                        "name": normalized["name"],
-                        "caller": caller_name,
-                        "context": normalized.get("signature", ""),
-                    }
-                )
-
-            if len(results) >= _MAX_CALLERS:
-                break
+                # Queue the caller's definition for further BFS
+                def_file = item.get("def_file", "")
+                def_line = item.get("def_line", 0)
+                if def_file and def_line:
+                    key = (def_file, def_line)
+                    if key not in seen_defs:
+                        seen_defs.add(key)
+                        queue.append(key)
 
         return results
 
@@ -606,6 +614,7 @@ class GoTracer(Tracer):
                 if stripped.startswith(kw):
                     # Find the name after the keyword
                     rest = stripped[len(kw) :]
+                    prefix = len(kw)
                     # For methods, skip receiver: func (r *Type) Name(...)
                     if rest.startswith(b"("):
                         # Count nested parentheses to handle func (f func()) Name()
@@ -617,15 +626,15 @@ class GoTracer(Tracer):
                             elif rest[close : close + 1] == b")":
                                 depth -= 1
                             close += 1
-                        rest = rest[close:].lstrip()
+                        prefix += close
+                        rest = rest[close:]
+                    # Skip whitespace before name
+                    ws = len(rest) - len(rest.lstrip())
+                    prefix += ws
+                    rest = rest.lstrip()
                     name_match = re.match(rb"(\w+)", rest)
                     if name_match:
-                        return (
-                            indent
-                            + len(kw)
-                            + (len(rest) - len(rest.lstrip()))
-                            + name_match.start()
-                        )
+                        return indent + prefix + name_match.start()
         except Exception:
             logger.warning("_def_name_col failed for %s:%d", file, line, exc_info=True)
         return None
@@ -656,8 +665,23 @@ class GoTracer(Tracer):
             if node.type == "call_expression":
                 func_node = node.child_by_field_name("function")
                 if func_node:
-                    line = func_node.start_point[0] + 1
-                    col = func_node.start_point[1]
+                    # For selector expressions like `shared.ToContext(...)`,
+                    # gopls definition needs the column of the *field* (ToContext),
+                    # not the selector start. Walk to the rightmost identifier.
+                    target = func_node
+                    while target.type == "selector_expression":
+                        field_node = target.child_by_field_name("field")
+                        if field_node:
+                            target = field_node
+                            break
+                        # fallback: use the operand's rightmost child
+                        operand = target.child_by_field_name("operand")
+                        if operand:
+                            target = operand
+                        else:
+                            break
+                    line = target.start_point[0] + 1
+                    col = target.start_point[1]
                     if start_line <= line <= end_line:
                         positions.append((line, col))
             for child in node.children:
