@@ -21,6 +21,7 @@ dependencies = [
     "tavily-python>=0.7.0",
     "tree-sitter",
     "tree-sitter-python",
+    "tree-sitter-go",
     "jedi>=0.19.0",
     "sqlalchemy>=2.0.0",
     "aiosqlite>=0.22.0",

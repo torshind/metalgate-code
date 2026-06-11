@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from metalgate_code.context.tracer import Tracer
+from metalgate_code.context.tracer_base import Tracer
 
 
 def make_tools(tracer: Tracer) -> list:

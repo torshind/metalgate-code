@@ -1,9 +1,8 @@
-"""Core resolution engine using parso, jedi, and tree-sitter."""
+"""Python-specific tracer using parso, jedi, and tree-sitter."""
 
 import concurrent.futures
 import io
 import logging
-import os
 import re
 import tokenize
 from pathlib import Path
@@ -12,10 +11,12 @@ from typing import Optional
 import jedi
 import parso
 import tree_sitter_python as tspython
-from deepagents.backends.protocol import SandboxBackendProtocol
 from tree_sitter import Language, Parser
 
 from metalgate_code.context.cache import _CACHE_MISS, CodeCache
+from metalgate_code.context.tracer_base import _CALLERS_TIMEOUT, _MAX_CALLERS, Tracer
+
+logger = logging.getLogger("metalgate_code")
 
 _FUNC_TYPES = {"funcdef", "async_funcdef"}
 _CLASS_TYPE = "classdef"
@@ -23,11 +24,6 @@ _SCOPE_TYPES = _FUNC_TYPES | {_CLASS_TYPE}
 
 _PYCACHE = "__pycache__"
 _VENV_DIR = ".venv"
-_MAX_CALLERS = 50
-_CALLERS_TIMEOUT = 15.0
-_CALLERS_WORKERS = os.environ.get("CALLERS_WORKERS", 4)
-
-logger = logging.getLogger("metalgate_code")
 
 # Tree-sitter parser for fast exact symbol search
 _TS_LANGUAGE = Language(tspython.language())
@@ -153,7 +149,7 @@ def _collect_outline(node, result: list, parent_class: Optional[str] = None) -> 
 
 
 def _find_function_at(module, line: int):
-    """Return the innermost funcdef node whose body contains `line`."""
+    """Return the innermost funcdef node whose body contains *line*."""
     best = None
     best_size = None
 
@@ -180,7 +176,7 @@ def _find_function_at(module, line: int):
 
 
 def _find_scope_at_line(module, line: int):
-    """Return the tightest function or class node whose definition line == `line`."""
+    """Return the tightest function or class node whose definition line == *line*."""
     result = None
     best_size = None
 
@@ -211,7 +207,7 @@ def _call_positions(
 ) -> list[tuple[int, int]]:
     """Return (line, col) of every NAME token followed by '(' in [start_line, end_line].
 
-    If `func_name` is given, skip the token when it is `func_name` on the
+    If *func_name* is given, skip the token when it is *func_name* on the
     function's own definition line (avoids treating ``def foo(...):`` as a
     call to ``foo``).
     """
@@ -248,22 +244,22 @@ def _call_positions(
 
 
 def _name_col_on_line(line_text: str, name: str) -> Optional[int]:
-    """First column where `name` appears as a whole word."""
+    """First column where *name* appears as a whole word."""
     for m in re.finditer(rf"\b{re.escape(name)}\b", line_text):
         return m.start()
     return None
 
 
-class Tracer:
+class PythonTracer(Tracer):
+    """Python-specific tracer using parso, jedi, and tree-sitter."""
+
     def __init__(
         self,
         root: str,
-        backend: SandboxBackendProtocol,
+        backend,
         cache: CodeCache,
     ) -> None:
-        self.root = Path(root).resolve()
-        self.cache = cache
-        self.backend = backend
+        super().__init__(root, backend, cache)
 
         result = backend.execute("uv run which python")
         if result.exit_code is not None and result.exit_code == 0:
@@ -285,18 +281,6 @@ class Tracer:
             environment_path=python,
         )
 
-    def _read_file(self, file: str, limit: int = 10000) -> str:
-        """Read file content using backend if available, otherwise use local filesystem."""
-        if self.backend is not None:
-            result = self.backend.read(file, offset=0, limit=limit)
-            if result.error is None and result.file_data is not None:
-                return result.file_data["content"]
-        return Path(file).read_text(encoding="utf-8", errors="ignore")
-
-    def _read_file_bytes(self, file: str, limit: int = 10000) -> bytes:
-        """Read file content as bytes using backend if available."""
-        return self._read_file(file, limit=limit).encode("utf-8", errors="ignore")
-
     def _glob_py_files(self) -> list[Path]:
         """Find all .py files under root using backend if available."""
         if self.backend is not None:
@@ -306,7 +290,7 @@ class Tracer:
         return list(self.root.rglob("*.py"))
 
     def get_file_outline(self, file: str) -> list[dict]:
-        """Parse `file` and return every class/function/method with name, kind, line, end_line, signature."""
+        """Parse *file* and return every class/function/method with name, kind, line, end_line, signature."""
         cached = self.cache.get_outline(file)
         if cached is not None:
             return cached
@@ -329,7 +313,7 @@ class Tracer:
     def goto_definition(
         self, file: str, line: int, name: Optional[str] = None
     ) -> Optional[dict]:
-        """Resolve the symbol `name` on `line` of `file` to its definition."""
+        """Resolve the symbol *name* on *line* of *file* to its definition."""
         if name is None:
             name = self._first_name_on_line(file, line)
             if name is None:
@@ -344,7 +328,7 @@ class Tracer:
         return result
 
     def get_source(self, file: str, line: int, context: int = 60) -> dict:
-        """Return the full source of the function/class starting on `line`."""
+        """Return the full source of the function/class starting on *line*."""
         try:
             source = self._read_file(file)
             all_lines = source.splitlines()
@@ -357,7 +341,7 @@ class Tracer:
                 start = node.start_pos[0] - 1
                 end = node.end_pos[0]
             else:
-                # Fallback: return `context` lines centred on `line` (1-based).
+                # Fallback: return *context* lines centred on *line* (1-based).
                 centre = line - 1  # convert to 0-based index
                 start = max(0, centre - context // 2)
                 end = min(len(all_lines), centre + (context + 1) // 2)
@@ -378,10 +362,8 @@ class Tracer:
                 "error": str(exc),
             }
 
-    def get_callers(
-        self, file: str, line: int, timeout: float = _CALLERS_TIMEOUT
-    ) -> list[dict]:
-        """Find every place in the project that references the symbol on `line` of `file`."""
+    def get_callers(self, file: str, line: int) -> list[dict]:
+        """Find every place in the project that references the symbol on *line* of *file*."""
         col = self._def_name_col(file, line)
         if col is None:
             return []
@@ -394,7 +376,7 @@ class Tracer:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(_run)
             try:
-                refs = future.result(timeout=timeout)
+                refs = future.result(timeout=_CALLERS_TIMEOUT)
             except concurrent.futures.TimeoutError:
                 return [
                     {
@@ -402,7 +384,7 @@ class Tracer:
                         "line": 0,
                         "name": "",
                         "context": (
-                            f"get_callers timed out after {timeout}s. "
+                            f"get_callers timed out after {_CALLERS_TIMEOUT}s. "
                             "Try narrowing the search scope."
                         ),
                     }
@@ -450,7 +432,7 @@ class Tracer:
         return results
 
     def get_callees(self, file: str, line: int) -> list[dict]:
-        """Find every symbol called by the function on `line` of `file`, resolved to definitions."""
+        """Find every symbol called by the function on *line* of *file*, resolved to definitions."""
         try:
             source = self._read_file(file)
         except OSError:
@@ -500,7 +482,7 @@ class Tracer:
         return results
 
     def find_symbol(self, name: str) -> list[dict]:
-        """Search for `name` across the project and installed packages."""
+        """Search for *name* across the project and installed packages."""
         return self._exact_ts_search(name)
 
     def _exact_ts_search(self, name: str) -> list[dict]:
