@@ -28,6 +28,12 @@ from acp.schema import (
 )
 from deepagents.backends.protocol import SandboxBackendProtocol
 from deepagents_acp.server import AgentServerACP, AgentSessionContext
+from langchain_core.runnables.config import RunnableConfig
+from langgraph.checkpoint.base import (
+    CheckpointMetadata,
+    empty_checkpoint,
+)
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph.state import CompiledStateGraph
 
 from metalgate_code.memory.replayer import ChatHistoryReplayer
@@ -63,6 +69,7 @@ class MetalGateACP(AgentServerACP):
         super().__init__(agent=self._create_agent, modes=modes, models=models)
         self._store = SessionStore()
         self._replayer = ChatHistoryReplayer()
+        self._pending_session_messages: dict[str, list[Any]] = {}
 
     def _create_agent(self, context: AgentSessionContext) -> CompiledStateGraph:
         """Called by base class to create the agent for a session."""
@@ -128,12 +135,54 @@ class MetalGateACP(AgentServerACP):
                 processed.append(TextContentBlock(type="text", text=text))
             else:
                 processed.append(block)
+
+        # Inject pending historical messages into the agent's state if this is the
+        # first prompt after a load/resume.
+        pending = self._pending_session_messages.pop(session_id, None)
+        if pending:
+            if self._agent is None:
+                self._reset_agent(session_id)
+            if self._agent is not None:
+                config: RunnableConfig = {"configurable": {"thread_id": session_id}}
+                try:
+                    # aupdate_state needs an existing checkpoint to branch from.
+                    # On a fresh process the in-memory checkpointer has none for
+                    # this thread, so seed it directly.
+                    checkpointer = self._agent.checkpointer
+                    if isinstance(checkpointer, MemorySaver):
+                        seed_config: RunnableConfig = {
+                            "configurable": {
+                                "thread_id": session_id,
+                                "checkpoint_ns": "",
+                            }
+                        }
+                        if not await checkpointer.aget_tuple(seed_config):
+                            metadata: CheckpointMetadata = {
+                                "source": "input",
+                                "step": -1,
+                                "parents": {},
+                            }
+                            await checkpointer.aput(
+                                seed_config,
+                                empty_checkpoint(),
+                                metadata,
+                                {},
+                            )
+                    await self._agent.aupdate_state(
+                        config, {"messages": pending}, as_node="__start__"
+                    )
+                    logger.info(
+                        f"Injected {len(pending)} pending messages into session {session_id}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to inject pending messages for session {session_id}: {e}"
+                    )
+
         response = await super().prompt(processed, session_id, message_id, **kwargs)
 
         # Persist messages after the prompt completes
         if self._agent is not None:
-            from langchain_core.runnables import RunnableConfig
-
             config: RunnableConfig = {"configurable": {"thread_id": session_id}}
             try:
                 state = await self._agent.aget_state(config)
@@ -216,6 +265,8 @@ class MetalGateACP(AgentServerACP):
 
         # Replay chat history after returning the response
         messages = await self._store.load_messages(cwd, session_id)
+        if messages:
+            self._pending_session_messages[session_id] = messages
         await self._replayer.replay(self._conn, session_id, messages)
 
         return self._modes, config_options

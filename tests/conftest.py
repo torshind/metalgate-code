@@ -15,6 +15,7 @@ import pytest
 from acp import spawn_agent_process, text_block
 from acp.interfaces import Client
 from acp.schema import (
+    AgentMessageChunk,
     AllowedOutcome,
     CreateTerminalRequest,
     CreateTerminalResponse,
@@ -31,6 +32,7 @@ from acp.schema import (
     TerminalOutputRequest,
     TerminalOutputResponse,
     ToolCallStart,
+    UserMessageChunk,
     WaitForTerminalExitRequest,
     WaitForTerminalExitResponse,
     WriteTextFileRequest,
@@ -77,10 +79,12 @@ class RecordingClient(Client):
     @param_model(RequestPermissionRequest)
     async def request_permission(self, options, session_id, tool_call, **kwargs):
         title = getattr(tool_call, "title", None) or "<unknown>"
-        self.permission_requests.append({
-            "title": title,
-            "options": [getattr(o, "kind", o) for o in options],
-        })
+        self.permission_requests.append(
+            {
+                "title": title,
+                "options": [getattr(o, "kind", o) for o in options],
+            }
+        )
         allow_option = next(
             (o for o in options if o.kind in ("allow_once", "allow_always")), None
         )
@@ -179,7 +183,31 @@ class RecordingClient(Client):
 
     @property
     def all_text(self) -> str:
-        return "\n".join(t for upd in self.updates for t in self._extract_text(upd))
+        """All text joined with spaces (newlines collapsed)."""
+        raw = "\n".join(t for upd in self.updates for t in self._extract_text(upd))
+        return " ".join(raw.split())
+
+    @property
+    def agent_text(self) -> str:
+        """Text from all AgentMessageChunk updates (AI responses)."""
+        raw = "\n".join(
+            t
+            for upd in self.updates
+            if isinstance(upd, AgentMessageChunk)
+            for t in self._extract_text(upd)
+        )
+        return " ".join(raw.split())
+
+    @property
+    def user_text(self) -> str:
+        """Text from all UserMessageChunk updates (human messages)."""
+        raw = "\n".join(
+            t
+            for upd in self.updates
+            if isinstance(upd, UserMessageChunk)
+            for t in self._extract_text(upd)
+        )
+        return " ".join(raw.split())
 
 
 @pytest.fixture
