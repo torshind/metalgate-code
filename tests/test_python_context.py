@@ -1,13 +1,16 @@
 """Integration tests for contextual symbol search tools."""
 
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
 import pytest
+from acp.schema import ToolCallStart
 from deepagents.backends import LocalShellBackend
 
 from metalgate_code.context import get_code_tools
+from tests.conftest import RecordingClient, run_agent
 
 SAMPLE_DIR = Path(__file__).parent / "sample" / "python"
 ORDERS_FILE = str(SAMPLE_DIR / "orders.py")
@@ -270,3 +273,48 @@ class TestFindSymbol:
         results = tools["find_symbol"]("Order")
         names = [r["name"] for r in results]
         assert "Order" in names
+
+
+# Agent workflow — validates the agent actually uses all context tools
+@pytest.mark.asyncio
+async def test_agent_uses_context_tools(run_sh: Path) -> None:
+    """Ensure the agent can use every context tool to analyze source code."""
+    client = RecordingClient(prefix="acp_python_context_test_")
+    with client:
+        src = Path(__file__).parent / "sample" / "python"
+        dst = client.temp_dir / "sample_python"
+        shutil.copytree(src, dst)
+
+        await run_agent(
+            client,
+            run_sh,
+            f"""
+            In the directory {dst}, there is a Python project with orders.py, validation.py, and utils.py.
+            I need you to do a full cross-reference analysis of the function 'validate_address':
+            1. Use find_symbol to locate 'validate_address'.
+            2. Use get_file_outline on validation.py to see all symbols in that file.
+            3. Use goto_definition from orders.py to find where validate_address is defined.
+            4. Use get_source to read the full source code of validate_address.
+            5. Use get_callers on validate_address to see who calls it.
+            6. Use get_callees on the process method in orders.py to see what it calls.
+            Report back what validate_address does, what constant it references, and who calls it.
+            """,
+        )
+
+        called_tools = {
+            update.title
+            for update in client.updates
+            if isinstance(update, ToolCallStart)
+        }
+        required = {
+            "find_symbol",
+            "get_file_outline",
+            "goto_definition",
+            "get_source",
+            "get_callers",
+            "get_callees",
+        }
+        missing = required - called_tools
+        assert not missing, (
+            f"Agent did not call these context tools: {missing}. Called: {called_tools}"
+        )

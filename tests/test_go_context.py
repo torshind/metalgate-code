@@ -6,9 +6,11 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from acp.schema import ToolCallStart
 from deepagents.backends import LocalShellBackend
 
 from metalgate_code.context import get_code_tools
+from tests.conftest import RecordingClient, run_agent
 
 SAMPLE_DIR = Path(__file__).parent / "sample" / "go"
 ORDERS_FILE = str(SAMPLE_DIR / "orders.go")
@@ -65,7 +67,9 @@ class TestGetFileOutline:
 
     def test_finds_interface(self, tools):
         symbols = tools["get_file_outline"](ORDERS_FILE)
-        assert any(s["name"] == "Processor" and s["kind"] == "interface" for s in symbols)
+        assert any(
+            s["name"] == "Processor" and s["kind"] == "interface" for s in symbols
+        )
 
     def test_finds_function(self, tools):
         symbols = tools["get_file_outline"](ORDERS_FILE)
@@ -74,7 +78,8 @@ class TestGetFileOutline:
     def test_finds_method(self, tools):
         symbols = tools["get_file_outline"](ORDERS_FILE)
         method = next(
-            (s for s in symbols if s["name"] == "Process" and s["kind"] == "method"), None
+            (s for s in symbols if s["name"] == "Process" and s["kind"] == "method"),
+            None,
         )
         assert method is not None
 
@@ -278,3 +283,48 @@ class TestGetCallers:
         line = next(s for s in symbols if s["name"] == "UnusedFunc")["line"]
         callers = tools["get_callers"](ORDERS_FILE, line)
         assert callers == []
+
+
+# Agent workflow — validates the agent actually uses all context tools
+@pytest.mark.asyncio
+async def test_agent_uses_context_tools(run_sh: Path) -> None:
+    """Ensure the agent can use every context tool to analyze Go source code."""
+    client = RecordingClient(prefix="acp_go_context_test_")
+    with client:
+        src = Path(__file__).parent / "sample" / "go"
+        dst = client.temp_dir / "sample_go"
+        shutil.copytree(src, dst)
+
+        await run_agent(
+            client,
+            run_sh,
+            f"""
+            In the directory {dst}, there is a Go project with orders.go, validation.go, and utils.go.
+            I need you to do a full cross-reference analysis of the function 'ValidateAddress':
+            1. Use find_symbol to locate 'ValidateAddress'.
+            2. Use get_file_outline on validation.go to see all symbols in that file.
+            3. Use goto_definition from orders.go to find where ValidateAddress is defined.
+            4. Use get_source to read the full source code of ValidateAddress.
+            5. Use get_callers on ValidateAddress to see who calls it.
+            6. Use get_callees on the Process method in orders.go to see what it calls.
+            Report back what ValidateAddress does, what constant it references, and who calls it.
+            """,
+        )
+
+        called_tools = {
+            update.title
+            for update in client.updates
+            if isinstance(update, ToolCallStart)
+        }
+        required = {
+            "find_symbol",
+            "get_file_outline",
+            "goto_definition",
+            "get_source",
+            "get_callers",
+            "get_callees",
+        }
+        missing = required - called_tools
+        assert not missing, (
+            f"Agent did not call these context tools: {missing}. Called: {called_tools}"
+        )

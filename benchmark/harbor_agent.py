@@ -27,7 +27,7 @@ class HarborAgent(BaseAgent):
         return "metalgate"
 
     def version(self) -> str | None:
-        return "0.1.0"
+        return "0.2.0"
 
     async def setup(self, environment: BaseEnvironment) -> None:
         pass
