@@ -1,6 +1,6 @@
 [project]
 name = "metalgate-code"
-version = "0.1.0"
+version = "0.2.0"
 description = "ACP (Agent Communication Protocol) code agent featuring in-session dynamic deterministic tool skills and optional cross-session persistent memory."
 readme = "README.md"
 requires-python = ">=3.12"
