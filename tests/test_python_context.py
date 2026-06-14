@@ -9,7 +9,7 @@ from deepagents.backends import LocalShellBackend
 
 from metalgate_code.context import get_code_tools
 
-SAMPLE_DIR = Path(__file__).parent / "sample"
+SAMPLE_DIR = Path(__file__).parent / "sample" / "python"
 ORDERS_FILE = str(SAMPLE_DIR / "orders.py")
 VALIDATION_FILE = str(SAMPLE_DIR / "validation.py")
 UTILS_FILE = str(SAMPLE_DIR / "utils.py")

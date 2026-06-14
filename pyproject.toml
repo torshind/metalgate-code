@@ -5,15 +5,14 @@ description = "ACP (Agent Communication Protocol) code agent featuring in-sessio
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "deepagents==0.5.5",
-    "deepagents-acp==0.0.6",
-    "deepagents-cli==0.0.46",
-    "agent-client-protocol==0.9.0",
+    "deepagents==0.6.8",
+    "deepagents-acp==0.0.8",
+    "deepagents-code==0.1.11",
+    "agent-client-protocol>=0.10.0",
     "isort>=8.0.0",
     "langchain-community>=0.4.0",
     "langchain-mcp-adapters>=0.2.0",
-    "langchain-openai>=1.1.0",
-    "langgraph>=1.1.0",
+    "langchain-openai>=1.2.0",
     "mem0ai>=0.1.0",
     "chromadb>=0.5.0",
     "tiktoken>=0.12.0",
@@ -22,6 +21,7 @@ dependencies = [
     "tavily-python>=0.7.0",
     "tree-sitter",
     "tree-sitter-python",
+    "tree-sitter-go",
     "jedi>=0.19.0",
     "sqlalchemy>=2.0.0",
     "aiosqlite>=0.22.0",

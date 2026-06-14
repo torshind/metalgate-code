@@ -4,29 +4,19 @@ ACP Server factory for MetalGate Code agent.
 
 import logging
 import os
+from pathlib import Path
 from typing import Any, Callable
 
-from acp.helpers import (
-    start_tool_call,
-    text_block,
-    update_agent_message,
-    update_tool_call,
-    update_user_message,
-)
 from acp.schema import (
     AgentCapabilities,
-    AudioContentBlock,
     CloseSessionResponse,
-    EmbeddedResourceContentBlock,
     HttpMcpServer,
-    ImageContentBlock,
     InitializeResponse,
     ListSessionsResponse,
     LoadSessionResponse,
     McpServerStdio,
     NewSessionResponse,
     PromptCapabilities,
-    PromptResponse,
     ResourceContentBlock,
     ResumeSessionResponse,
     SessionCapabilities,
@@ -38,19 +28,22 @@ from acp.schema import (
 )
 from deepagents.backends.protocol import SandboxBackendProtocol
 from deepagents_acp.server import AgentServerACP, AgentSessionContext
-from deepagents_cli.sessions import _patch_aiosqlite
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langchain_core.runnables import RunnableConfig
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langchain_core.runnables.config import RunnableConfig
+from langgraph.checkpoint.base import (
+    CheckpointMetadata,
+    empty_checkpoint,
+)
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph.state import CompiledStateGraph
 
-from metalgate_code.helpers import get_checkpoints_data_dir
+from metalgate_code.memory.replayer import ChatHistoryReplayer
+from metalgate_code.memory.session_store import SessionStore
 
 logger = logging.getLogger("metalgate_code")
 
 
 class MetalGateACP(AgentServerACP):
-    """Custom ACP server with AsyncSqliteSaver checkpointer."""
+    """Custom ACP server with manual SQLite message persistence."""
 
     def __init__(
         self,
@@ -71,12 +64,16 @@ class MetalGateACP(AgentServerACP):
         """
         self._user_agent_factory = agent_factory
         self._backend_factory = backend_factory
-        self._shell_backend: SandboxBackendProtocol
-        # Pass wrapper as the agent to the base class
+        # Pass wrapper as the agent to the base class.
+        # The base class will use MemorySaver automatically when checkpointer is None.
         super().__init__(agent=self._create_agent, modes=modes, models=models)
+        self._store = SessionStore()
+        self._replayer = ChatHistoryReplayer()
+        self._pending_session_messages: dict[str, list[Any]] = {}
 
     def _create_agent(self, context: AgentSessionContext) -> CompiledStateGraph:
         """Called by base class to create the agent for a session."""
+        self._shell_backend = self._backend_factory(context.cwd)
         return self._user_agent_factory(context, self._shell_backend)
 
     async def initialize(
@@ -101,10 +98,107 @@ class MetalGateACP(AgentServerACP):
             ),
         )
 
-    def _setup_session(self, cwd: str, session_id: str) -> None:
-        self._shell_backend = self._backend_factory(cwd)
-        if self._agent is None:
-            self._reset_agent(session_id)
+    @staticmethod
+    def _resolve_resource_uri(block: ResourceContentBlock, root_dir: str) -> str:
+        """Convert a ResourceContentBlock to resolved text with absolute path."""
+        file_prefix = "file://"
+        resource_text = f"[Resource: {block.name}"
+        if block.uri:
+            uri = block.uri
+            has_file_prefix = uri.startswith(file_prefix)
+            path = uri[len(file_prefix) :] if has_file_prefix else uri
+
+            # Resolve relative paths against root_dir
+            if not path.startswith("/"):
+                path = str(Path(root_dir) / path)
+
+            # Strip root_dir prefix for cleaner display
+            if path.startswith(root_dir):
+                path = path[len(root_dir) :].lstrip("/")
+
+            uri = f"file://{path}" if has_file_prefix else path
+            resource_text += f"\nURI: {uri}"
+        if block.description:
+            resource_text += f"\nDescription: {block.description}"
+        if block.mime_type:
+            resource_text += f"\nMIME type: {block.mime_type}"
+        resource_text += "]"
+        return resource_text
+
+    async def prompt(self, prompt, session_id, message_id=None, **kwargs):  # noqa: PLR0913
+        """Process a user prompt and persist messages afterward."""
+        # Pre-resolve ResourceContentBlock URIs before base class processes them
+        processed = []
+        for block in prompt:
+            if isinstance(block, ResourceContentBlock):
+                text = self._resolve_resource_uri(block, self._cwd)
+                processed.append(TextContentBlock(type="text", text=text))
+            else:
+                processed.append(block)
+
+        # Inject pending historical messages into the agent's state if this is the
+        # first prompt after a load/resume.
+        pending = self._pending_session_messages.pop(session_id, None)
+        if pending:
+            if self._agent is None:
+                self._reset_agent(session_id)
+            if self._agent is not None:
+                config: RunnableConfig = {"configurable": {"thread_id": session_id}}
+                try:
+                    # aupdate_state needs an existing checkpoint to branch from.
+                    # On a fresh process the in-memory checkpointer has none for
+                    # this thread, so seed it directly.
+                    checkpointer = self._agent.checkpointer
+                    if isinstance(checkpointer, MemorySaver):
+                        seed_config: RunnableConfig = {
+                            "configurable": {
+                                "thread_id": session_id,
+                                "checkpoint_ns": "",
+                            }
+                        }
+                        if not await checkpointer.aget_tuple(seed_config):
+                            metadata: CheckpointMetadata = {
+                                "source": "input",
+                                "step": -1,
+                                "parents": {},
+                            }
+                            await checkpointer.aput(
+                                seed_config,
+                                empty_checkpoint(),
+                                metadata,
+                                {},
+                            )
+                    await self._agent.aupdate_state(
+                        config, {"messages": pending}, as_node="__start__"
+                    )
+                    logger.info(
+                        f"Injected {len(pending)} pending messages into session {session_id}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to inject pending messages for session {session_id}: {e}"
+                    )
+
+        response = await super().prompt(processed, session_id, message_id, **kwargs)
+
+        # Persist messages after the prompt completes
+        if self._agent is not None:
+            config: RunnableConfig = {"configurable": {"thread_id": session_id}}
+            try:
+                state = await self._agent.aget_state(config)
+                if isinstance(state.values, dict):
+                    messages = state.values.get("messages", [])
+                    if messages:
+                        cwd = (
+                            self._session_cwds.get(session_id)
+                            or self._cwd
+                            or os.getcwd()
+                        )
+                        await self._store.save_messages(cwd, session_id, messages)
+            except Exception as e:
+                logger.warning(f"Failed to save messages for session {session_id}: {e}")
+
+        return response
 
     async def new_session(
         self,
@@ -113,91 +207,43 @@ class MetalGateACP(AgentServerACP):
         **kwargs: Any,  # noqa: ARG002  # ACP protocol interface parameter
     ) -> NewSessionResponse:
         logger.info(f"Creating new session for cwd {cwd}")
-
-        response = await super().new_session(cwd, mcp_servers, **kwargs)
-        self._setup_session(cwd, response.session_id)
-
-        return response
+        await self._store.init_db(cwd)
+        return await super().new_session(cwd, mcp_servers, **kwargs)
 
     async def list_sessions(
         self,
+        additional_directories: list[str] | None = None,
         cursor: str | None = None,
         cwd: str | None = None,
         **kwargs: Any,
     ) -> ListSessionsResponse:
-        """List available sessions from the SQLite checkpointer database."""
-
-        _patch_aiosqlite()
-
-        # Use provided cwd or current working directory
+        """List available sessions from the SQLite database."""
         target_cwd = cwd or self._cwd or os.getcwd()
-        db_path = get_checkpoints_data_dir(target_cwd)
+        session_rows = await self._store.list_sessions(target_cwd)
 
         sessions: list[SessionInfo] = []
-
-        if db_path.exists():
-            async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
-                conn = checkpointer.conn
-                # Query threads with metadata - deepagents stores metadata as JSON
-                async with conn.execute(
-                    """SELECT thread_id,
-                           MAX(json_extract(metadata, '$.title')) as title,
-                           MAX(json_extract(metadata, '$.updated_at')) as updated_at
-                    FROM checkpoints
-                    GROUP BY thread_id
-                    ORDER BY updated_at DESC NULLS LAST, thread_id DESC""",
-                ) as cursor_obj:
-                    rows = await cursor_obj.fetchall()
-                    for row in rows:
-                        thread_id, title, updated_at = row
-                        display_title = title or f"Session {thread_id[:8]}"
-                        sessions.append(
-                            SessionInfo(
-                                session_id=thread_id,
-                                cwd=target_cwd,
-                                title=display_title,
-                                updated_at=updated_at,
-                            )
-                        )
+        for thread_id, title, updated_at in session_rows:
+            display_title = title or f"Session {thread_id[:8]}"
+            sessions.append(
+                SessionInfo(
+                    session_id=thread_id,
+                    cwd=target_cwd,
+                    title=display_title,
+                    updated_at=updated_at,
+                )
+            )
 
         logger.info(f"List sessions: {len(sessions)} found in {target_cwd}")
-
         return ListSessionsResponse(sessions=sessions, next_cursor=None)
-
-    async def _session_exists(self, session_id: str, cwd: str) -> bool:
-        """Check if a session exists in the checkpointer database."""
-
-        _patch_aiosqlite()
-        db_path = get_checkpoints_data_dir(cwd)
-
-        if not db_path.exists():
-            return False
-
-        async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
-            conn = checkpointer.conn
-            async with conn.execute(
-                "SELECT 1 FROM checkpoints WHERE thread_id = ? LIMIT 1",
-                (session_id,),
-            ) as cursor:
-                return await cursor.fetchone() is not None
 
     async def _restore_session(
         self,
         session_id: str,
         cwd: str,
     ) -> tuple[Any | None, Any | None]:
-        """Common session setup logic for load and resume operations.
-
-        Verifies the session exists, stores context, initializes state,
-        and replays chat history.
-
-        Returns:
-            Tuple of (modes, config_options) to use in the response.
-        """
-        self._setup_session(cwd, session_id=session_id)
-
+        """Common session setup logic for load and resume operations."""
         # Verify session exists
-        exists = await self._session_exists(session_id, cwd)
+        exists = await self._store.session_exists(cwd, session_id)
         if not exists:
             logger.warning(f"Session {session_id} not found in database for cwd {cwd}")
 
@@ -218,7 +264,10 @@ class MetalGateACP(AgentServerACP):
             config_options = self._build_config_options(session_id)
 
         # Replay chat history after returning the response
-        await self._replay_chat_history(session_id, cwd)
+        messages = await self._store.load_messages(cwd, session_id)
+        if messages:
+            self._pending_session_messages[session_id] = messages
+        await self._replayer.replay(self._conn, session_id, messages)
 
         return self._modes, config_options
 
@@ -226,18 +275,13 @@ class MetalGateACP(AgentServerACP):
         self,
         cwd: str,
         session_id: str,
+        additional_directories: list[str] | None = None,
         mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
         **kwargs: Any,
     ) -> LoadSessionResponse:
-        """Load an existing session with the given ID.
-
-        Verifies the session exists in the checkpointer before returning.
-        The cwd is provided by the client and used as-is.
-        """
+        """Load an existing session with the given ID."""
         logger.info(f"Loading session {session_id} for cwd {cwd}")
-
         modes, config_options = await self._restore_session(session_id, cwd)
-
         return LoadSessionResponse(
             modes=modes,
             config_options=config_options,
@@ -247,18 +291,13 @@ class MetalGateACP(AgentServerACP):
         self,
         cwd: str,
         session_id: str,
+        additional_directories: list[str] | None = None,
         mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
         **kwargs: Any,
     ) -> ResumeSessionResponse:
-        """Resume an existing session with the given ID.
-
-        Verifies the session exists in the checkpointer before returning.
-        The cwd is provided by the client and used as-is.
-        """
+        """Resume an existing session with the given ID."""
         logger.info(f"Resuming session {session_id} for cwd {cwd}")
-
         modes, config_options = await self._restore_session(session_id, cwd)
-
         return ResumeSessionResponse(
             modes=modes,
             config_options=config_options,
@@ -268,148 +307,4 @@ class MetalGateACP(AgentServerACP):
         self, session_id: str, **kwargs: Any
     ) -> CloseSessionResponse | None:
         logger.info(f"Closing session {session_id}")
-
         return await super().close_session(session_id, **kwargs)
-
-    async def _replay_chat_history(self, session_id: str, cwd: str) -> None:
-        """Replay chat history by sending session_update notifications."""
-
-        _patch_aiosqlite()
-
-        db_path = get_checkpoints_data_dir(cwd)
-        if not db_path.exists():
-            return
-
-        try:
-            async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
-                # Get the checkpoint tuple for this thread
-                config: RunnableConfig = {"configurable": {"thread_id": session_id}}  # type: ignore[dict-item]
-                tuple_result = await checkpointer.aget_tuple(config)
-
-                if tuple_result is None or tuple_result.checkpoint is None:
-                    return
-
-                # Get messages from the checkpoint state
-                checkpoint = tuple_result.checkpoint
-                channel_values = checkpoint.get("channel_values", {})
-                messages = channel_values.get("messages", [])
-
-                logger.info(
-                    f"Replaying {len(messages)} messages for session {session_id}"
-                )
-
-                # Replay each message as a session update
-                for msg in messages:
-                    await self._send_message_chunk(session_id, msg)
-
-        except Exception as e:
-            logger.warning(f"Error replaying chat history: {e}")
-
-    def _extract_text_from_content(self, content: Any) -> str | None:
-        """Extract text from content which may be a string or list of blocks."""
-        if isinstance(content, list):
-            text_parts = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text_parts.append(block.get("text", ""))
-            return "".join(text_parts) if text_parts else None
-        if content:
-            return str(content)
-        return None
-
-    async def _send_message_chunk(self, session_id: str, msg: Any) -> None:
-        """Send a single message as a session update notification."""
-        try:
-            logger.debug(f"Sending message chunk type: {type(msg)}")
-            if isinstance(msg, HumanMessage):
-                await self._send_human_message(session_id, msg)
-            elif isinstance(msg, AIMessage):
-                await self._send_ai_message(session_id, msg)
-            elif isinstance(msg, ToolMessage):
-                await self._send_tool_message(session_id, msg)
-        except Exception as e:
-            logger.warning(f"Error sending message chunk: {e}")
-
-    async def _send_human_message(self, session_id: str, msg: HumanMessage) -> None:
-        text = self._extract_text_from_content(msg.content)
-        if text:
-            await self._conn.session_update(
-                session_id=session_id,
-                update=update_user_message(text_block(text)),
-            )
-
-    async def _send_ai_message(self, session_id: str, msg: AIMessage) -> None:
-        text = self._extract_text_from_content(msg.content)
-
-        if text:
-            await self._conn.session_update(
-                session_id=session_id,
-                update=update_agent_message(text_block(text)),
-            )
-
-        for tc in msg.tool_calls:
-            call_id = tc.get("id") or ""
-            await self._conn.session_update(
-                session_id=session_id,
-                update=start_tool_call(
-                    title=f"Using {tc.get('name') or 'tool'}",
-                    tool_call_id=call_id,
-                    status="in_progress",
-                    kind=None,
-                    raw_input=tc.get("args") or None,
-                ),
-            )
-
-    async def _send_tool_message(self, session_id: str, msg: ToolMessage) -> None:
-        await self._conn.session_update(
-            session_id=session_id,
-            update=update_tool_call(
-                tool_call_id=msg.tool_call_id or "",
-                status="completed",
-                raw_output=self._extract_text_from_content(msg.content) or None,
-            ),
-        )
-
-    async def prompt(
-        self,
-        prompt: list[
-            TextContentBlock
-            | ImageContentBlock
-            | AudioContentBlock
-            | ResourceContentBlock
-            | EmbeddedResourceContentBlock
-        ],
-        session_id: str,
-        message_id: str | None = None,
-        **kwargs: Any,
-    ) -> PromptResponse:
-        """Process a user prompt with AsyncSqliteSaver checkpointer."""
-        logger.debug(f"Prompting session {session_id} with prompt {prompt}")
-
-        _patch_aiosqlite()
-
-        if self._agent is None:
-            self._reset_agent(session_id)
-
-        if self._agent is None:
-            msg = "Agent initialization failed"
-            raise RuntimeError(msg)
-
-        # Use the cwd associated with this session (stored at load/resume time)
-        # Fall back to current cwd if session not found
-        session_cwd = self._session_cwds.get(session_id, self._cwd)
-        db_path = get_checkpoints_data_dir(session_cwd)
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        logger.info(
-            f"Opening AsyncSqliteSaver checkpointer at {db_path} for session {session_id}"
-        )
-
-        # from_conn_string is an async context manager
-        async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
-            self._agent.checkpointer = checkpointer
-
-            result = await super().prompt(prompt, session_id, message_id, **kwargs)
-
-        # Note: checkpointer is closed when exiting the context
-        self._agent.checkpointer = None
-        return result

@@ -469,13 +469,14 @@ done
         """Search for a literal string in files using `grep -F` (sync)."""
         return _run_async(self.agrep(pattern, path=path, glob=glob))
 
-    async def aglob(self, pattern: str, path: str = "/") -> GlobResult:
+    async def aglob(self, pattern: str, path: str | None = None) -> GlobResult:
         """Find files matching glob pattern using shell commands.
 
         Recursively searches for files matching the glob pattern using find.
         Supports patterns like '*.py', '**/*.py', '*.pyi', etc.
         """
-        safe_path = shlex.quote(path)
+        resolved_path = path if path is not None else "/"
+        safe_path = shlex.quote(resolved_path)
 
         # Convert glob pattern to find-compatible pattern
         # Handle **/ prefix for recursive matching
@@ -498,7 +499,7 @@ done
         if result.exit_code is not None and result.exit_code > 1:
             detail = result.output.strip() if result.output else ""
             return GlobResult(
-                error=f"Path not found or not accessible: {path}"
+                error=f"Path not found or not accessible: {resolved_path}"
                 + (f" ({detail})" if detail else "")
             )
 
@@ -515,7 +516,7 @@ done
 
         return GlobResult(matches=file_infos)
 
-    def glob(self, pattern: str, path: str = "/") -> GlobResult:
+    def glob(self, pattern: str, path: str | None = None) -> GlobResult:
         """Find files matching glob pattern using shell commands."""
         return _run_async(self.aglob(pattern, path=path))
 

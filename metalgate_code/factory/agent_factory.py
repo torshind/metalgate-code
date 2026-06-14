@@ -14,8 +14,10 @@ from deepagents.backends import (
     StateBackend,
 )
 from deepagents.backends.protocol import SandboxBackendProtocol
+from deepagents.graph import DeepAgentState
 from deepagents_acp.server import AgentSessionContext
-from deepagents_cli.local_context import LocalContextMiddleware
+from deepagents_code.local_context import LocalContextMiddleware
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph.state import CompiledStateGraph
 
 from metalgate_code.config import get_interrupt_config
@@ -175,6 +177,8 @@ def _build_agent(
         ],
         tools=META_SKILLS + context_tools,
         system_prompt=system_prompt,
+        state_schema=DeepAgentState,
+        checkpointer=MemorySaver(),
     )
 
 
