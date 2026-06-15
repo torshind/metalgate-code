@@ -15,6 +15,7 @@ from deepagents.backends import (
 )
 from deepagents.backends.protocol import SandboxBackendProtocol
 from deepagents.graph import DeepAgentState
+from deepagents.middleware.subagents import SubAgent
 from deepagents_acp.server import AgentSessionContext
 from deepagents_code.local_context import LocalContextMiddleware
 from langgraph.checkpoint.memory import MemorySaver
@@ -62,6 +63,18 @@ META_SKILLS = [
     read_tool_skill,
     reload_tool_skills,
 ]
+
+_TEST_SUBAGENT: SubAgent = {
+    "name": "test_subagent",
+    "description": "A test subagent that can run shell commands using the execute tool.",
+    "system_prompt": (
+        "You are a test subagent. When asked to run a shell command, "
+        "use the execute tool. Complete the assigned task."
+    ),
+    # "interrupt_on": {
+    #     "execute": {"allowed_decisions": ["approve", "reject"]},
+    # },
+}
 
 
 def _build_agent(
@@ -179,6 +192,7 @@ def _build_agent(
         system_prompt=system_prompt,
         state_schema=DeepAgentState,
         checkpointer=MemorySaver(),
+        subagents=[_TEST_SUBAGENT],
     )
 
 
