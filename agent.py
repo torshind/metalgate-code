@@ -5,13 +5,14 @@ Coding agent using ACP.
 import asyncio
 import logging
 import os
+from pathlib import Path
 
 from acp import run_agent as run_acp_agent
-from dotenv import find_dotenv, load_dotenv
+from dotenv import load_dotenv
 
 from metalgate_code.config import get_available_modes
 from metalgate_code.factory import MetalGateACP, create_agent
-from metalgate_code.factory.agent_factory import LocalShellBackend
+from metalgate_code.factory.microsandbox_backend import MicrosandboxBackend
 from metalgate_code.models import fetch_models
 
 logging.basicConfig(
@@ -28,7 +29,7 @@ async def _serve_agent() -> None:
     """Run example agent from the root of the repository with ACP integration."""
     logger.info("Agent starting...")
 
-    load_dotenv(find_dotenv(".env", usecwd=True), override=True)
+    load_dotenv(os.path.expanduser("~/.metalgate/.env"), override=True)
 
     logger.info("Environment loaded")
     logger.info("API Key: %s", "ok" if os.environ.get("MODEL_API_KEY") else "not set")
@@ -38,12 +39,27 @@ async def _serve_agent() -> None:
     # Fetch models from the configured provider API
     models = fetch_models()
 
-    def make_shell_backend(cwd: str) -> LocalShellBackend:
-        """Factory that creates the shell backend when cwd is known."""
+    def make_shell_backend(cwd: str) -> MicrosandboxBackend:
+        """Factory that creates the shell backend when cwd is known.
+
+        Image selection (lowest → highest precedence):
+          1. Auto-detect from project files (go.mod → "go", else "uv:python").
+          2. ``SANDBOX_IMAGE`` env var (user override).
+        """
         shell_env = os.environ.copy()
-        return LocalShellBackend(
+
+        if os.environ.get("SANDBOX_IMAGE"):
+            image = os.environ["SANDBOX_IMAGE"]
+        elif Path(cwd, "go.mod").exists():
+            image = "go"
+        else:
+            image = "python"
+
+        logger.info("Using sandbox image: %s", image)
+
+        return MicrosandboxBackend(
             root_dir=cwd,
-            virtual_mode=False,
+            image=image,
             env=shell_env,
             inherit_env=True,
         )

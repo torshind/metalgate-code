@@ -25,10 +25,17 @@ async def test_agent_call_skills(run_sh: Path) -> None:
 import subprocess
 from typing import Tuple
 
-from langchain_core.tools import tool
-
 
 def _run(cmd: str) -> Tuple[int, str]:
+    """Run a shell command, using the sandbox backend if available."""
+    backend = get_backend()
+    if backend is not None:
+        result = backend.execute(cmd)
+        output = result.output.strip()
+        return (
+            result.exit_code if result.exit_code is not None else 1,
+            output or f"exited {result.exit_code}",
+        )
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
     output = (result.stdout + result.stderr).strip()
     return (result.returncode, (output or f"exited {result.returncode}"))
@@ -52,6 +59,7 @@ def list_all_files(path: str) -> Tuple[int, str]:
             run_sh,
             "Use list_all_files tool skill to list all files in the current directory.",
         )
+        logger.info("Agent output:\n%s", client.all_text)
 
         success = False
         for update in client.updates:
@@ -59,8 +67,6 @@ def list_all_files(path: str) -> Tuple[int, str]:
                 success = True
                 break
         assert success, "Agent did not call the list_all_files tool skill"
-
-        logger.info("Agent output:\n%s", client.all_text)
 
 
 @pytest.mark.asyncio
@@ -72,12 +78,8 @@ async def test_agent_reload_skills(run_sh: Path, tmp_path: Path) -> None:
     is running, then the agent reloading and using that skill.
     """
     test_skill_code_empty = """
-from langchain_core.tools import tool
 """
     test_skill_code_hello = '''
-from langchain_core.tools import tool
-
-
 @tool
 def hello_test_skill() -> str:
     """Say hello for testing."""
@@ -130,6 +132,7 @@ def hello_test_skill() -> str:
                 timeout=300,
             )
             await conn.close_session(session.session_id)
+            logger.info("Agent output:\n%s", client.all_text)
 
         # Verify reload_tool_skills was called
         reload_called = False
@@ -150,8 +153,6 @@ def hello_test_skill() -> str:
                 break
         assert skill_called, "Agent did not call hello_test_skill after reload"
 
-        logger.info("Agent output:\n%s", client.all_text)
-
 
 @pytest.mark.asyncio
 async def test_agent_create_test_delete_skills(run_sh: Path) -> None:
@@ -159,9 +160,6 @@ async def test_agent_create_test_delete_skills(run_sh: Path) -> None:
     Ensure the agent can manage tool skills lifecycle in a single session: create, test, delete.
     """
     test_skill_code = """
-from langchain_core.tools import tool
-
-
 """
     client = RecordingClient(prefix="acp_skills_test_")
     with client:
@@ -179,6 +177,7 @@ from langchain_core.tools import tool
             Finally, use tool skills to delete the tool skill called make_dataframe.
             """,
         )
+        logger.info("Agent output:\n%s", client.all_text)
 
         success = False
         for update in client.updates:
@@ -206,5 +205,3 @@ from langchain_core.tools import tool
                 success = True
                 break
         assert success, "Agent did not call the delete_tool_skill skill"
-
-        logger.info("Agent output:\n%s", client.all_text)

@@ -140,8 +140,10 @@ class RegistryMCP(MultiServerMCPClient):
     def _read_text(self, path: Path) -> str:
         """Read file text, using backend if available."""
         if self._backend is not None:
-            result = self._backend.execute(f"cat {path}")
-            return result.output
+            result = self._backend.read(str(path))
+            if result.error:
+                raise FileNotFoundError(f"Cannot read {path}: {result.error}")
+            return result.file_data["content"]
         return path.read_text()
 
     def _load_config(self) -> dict:

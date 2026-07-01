@@ -100,6 +100,15 @@ def web_search(query: str, num: int = 10) -> dict:
 # Subprocess tools
 #
 def _run(cmd: str) -> Tuple[int, str]:
+    """Run a shell command, using the sandbox backend if available."""
+    backend = get_backend()
+    if backend is not None:
+        result = backend.execute(cmd)
+        output = result.output.strip()
+        return (
+            result.exit_code if result.exit_code is not None else 1,
+            output or f"exited {result.exit_code}",
+        )
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
     output = (result.stdout + result.stderr).strip()
     return (result.returncode, (output or f"exited {result.returncode}"))

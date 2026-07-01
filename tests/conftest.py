@@ -40,6 +40,8 @@ from acp.schema import (
 )
 from acp.utils import param_model
 
+from metalgate_code.factory.microsandbox_backend import SANDBOX_WORKDIR
+
 # Logging (callers must set up basicConfig)
 logger = logging.getLogger("acp_test")
 
@@ -49,17 +51,53 @@ AGENT_TIMEOUT = 300
 
 
 class RecordingClient(Client):
-    """ACP client that records updates and auto-approves permissions with a temp working directory."""
+    """ACP client that records updates and auto-approves permissions with a temp working directory.
+
+    When the agent runs inside a sandbox VM, ``temp_dir`` is bind-mounted at
+    ``/workspace`` inside the VM.  Path translation helpers convert between
+    sandbox and host paths so that file operations and assertions work
+    transparently.
+    """
 
     def __init__(self, prefix: str = "acp_test_", auto_approve: bool = True) -> None:
         self.prefix = prefix
-        self.temp_dir: Path = Path(tempfile.mkdtemp(prefix=self.prefix))
+        self._own_temp_dir: Path = Path(tempfile.mkdtemp(prefix=self.prefix))
+        self.temp_dir: Path = self._own_temp_dir
         self.updates: list[Any] = []
         self.written_files: list[str] = []
         self.approved_options: list[str] = []
         self.denied_requests: list[str] = []
         self.permission_requests: list[dict[str, Any]] = []
         self.auto_approve = auto_approve
+
+    # ------------------------------------------------------------------ #
+    # Path translation
+    # ------------------------------------------------------------------ #
+
+    def _to_host_path(self, path: str) -> str:
+        """Translate a sandbox path (``/workspace/...``) to a host path."""
+        p = str(path)
+        if p == SANDBOX_WORKDIR:
+            return str(self.temp_dir)
+        prefix = SANDBOX_WORKDIR + "/"
+        if p.startswith(prefix):
+            return str(self.temp_dir / p[len(prefix) :])
+        return p
+
+    def _to_sandbox_path(self, path: str) -> str:
+        """Translate a host path (``temp_dir/...``) to a sandbox path."""
+        p = str(path)
+        host_dir = str(self.temp_dir)
+        if p == host_dir:
+            return SANDBOX_WORKDIR
+        prefix = host_dir + "/"
+        if p.startswith(prefix):
+            return SANDBOX_WORKDIR + "/" + p[len(prefix) :]
+        return p
+
+    def _to_sandbox_prompt(self, prompt: str) -> str:
+        """Replace host ``temp_dir`` references in a prompt with the sandbox path."""
+        return prompt.replace(str(self.temp_dir), SANDBOX_WORKDIR)
 
     def __enter__(self) -> Self:
         return self
@@ -74,7 +112,7 @@ class RecordingClient(Client):
 
     def cleanup(self) -> None:
         """Remove the temp working directory."""
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
+        shutil.rmtree(self._own_temp_dir, ignore_errors=True)
 
     @param_model(RequestPermissionRequest)
     async def request_permission(self, options, session_id, tool_call, **kwargs):
@@ -105,13 +143,16 @@ class RecordingClient(Client):
         if isinstance(update, ToolCallStart) and update.kind == "edit":
             for block in update.content or []:
                 if hasattr(block, "path"):
-                    self.written_files.append(str(Path(block.path).resolve()))
+                    self.written_files.append(
+                        str(Path(self._to_host_path(block.path)).resolve())
+                    )
 
     @param_model(ReadTextFileRequest)
     async def read_text_file(self, path, session_id, limit=None, line=None, **kwargs):
-        logger.info("READ %s", path)
+        host_path = self._to_host_path(path)
+        logger.info("READ %s -> %s", path, host_path)
         try:
-            content = Path(path).read_text(encoding="utf-8")
+            content = Path(host_path).read_text(encoding="utf-8")
             if line is not None:
                 lines = content.splitlines(keepends=True)
                 start = max(0, line - 1)
@@ -125,9 +166,10 @@ class RecordingClient(Client):
 
     @param_model(WriteTextFileRequest)
     async def write_text_file(self, content, path, session_id, **kwargs):
-        logger.info("WRITE %s", path)
-        Path(path).write_text(content, encoding="utf-8")
-        self.written_files.append(str(Path(path).resolve()))
+        host_path = self._to_host_path(path)
+        logger.info("WRITE %s -> %s", path, host_path)
+        Path(host_path).write_text(content, encoding="utf-8")
+        self.written_files.append(str(Path(host_path).resolve()))
         return WriteTextFileResponse()
 
     @param_model(CreateTerminalRequest)
@@ -259,7 +301,7 @@ async def run_agent(
         await asyncio.wait_for(
             conn.prompt(
                 session_id=session.session_id,
-                prompt=[text_block(prompt)],
+                prompt=[text_block(client._to_sandbox_prompt(prompt))],
             ),
             timeout=timeout,
         )

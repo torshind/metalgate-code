@@ -1,7 +1,7 @@
 """SQLite-backed cache for resolved symbols and file outlines.
 
 Keys are always (file, mtime) so stale entries are never served.
-Two tables: outlines (parso-extracted symbols) and definitions (jedi-resolved goto).
+Two tables: outlines (tree-sitter-extracted symbols) and definitions (ty-resolved goto).
 """
 
 import json

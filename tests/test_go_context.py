@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 from acp.schema import ToolCallStart
-from deepagents.backends import LocalShellBackend
 
 from metalgate_code.context import get_code_tools
+from metalgate_code.factory import MicrosandboxBackend
 from tests.conftest import RecordingClient, run_agent
 
 SAMPLE_DIR = Path(__file__).parent / "sample" / "go"
@@ -26,9 +26,8 @@ def tools():
         db_path = f.name
 
     shell_env = os.environ.copy()
-    shell_backend = LocalShellBackend(
+    shell_backend = MicrosandboxBackend(
         root_dir=str(SAMPLE_DIR),
-        virtual_mode=False,
         env=shell_env,
         inherit_env=True,
     )
@@ -293,7 +292,7 @@ async def test_agent_uses_context_tools(run_sh: Path) -> None:
     with client:
         src = Path(__file__).parent / "sample" / "go"
         dst = client.temp_dir / "sample_go"
-        shutil.copytree(src, dst)
+        shutil.copytree(src, dst, symlinks=True)
 
         await run_agent(
             client,

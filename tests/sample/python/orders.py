@@ -1,7 +1,7 @@
 """Order processing module."""
 
-from .validation import validate_address
-from .utils import format_currency
+from validation import validate_address
+from utils import format_currency
 
 class Order:
     """An order with address and amount."""
