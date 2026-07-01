@@ -179,7 +179,22 @@ class MetalGateACP(AgentServerACP):
                         f"Failed to inject pending messages for session {session_id}: {e}"
                     )
 
-        response = await super().prompt(processed, session_id, message_id, **kwargs)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                f"ACP prompt: session={session_id} blocks={[getattr(b, 'type', type(b).__name__) for b in processed]}"
+            )
+            for i, block in enumerate(processed):
+                text = getattr(block, "text", None)
+                if text:
+                    logger.debug(f"ACP prompt block {i}: {text[:200]!r}")
+        try:
+            response = await super().prompt(processed, session_id, message_id, **kwargs)
+            logger.debug(
+                f"ACP prompt response: {type(response).__name__} {getattr(response, 'updates', 'no updates')}"
+            )
+        except Exception as e:
+            logger.exception(f"ACP prompt failed for session {session_id}: {e}")
+            raise
 
         # Persist messages after the prompt completes
         if self._agent is not None:

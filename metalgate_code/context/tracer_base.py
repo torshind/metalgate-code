@@ -26,7 +26,10 @@ class Tracer(ABC):
         backend: SandboxBackendProtocol,
         cache: CodeCache,
     ) -> None:
-        self.root = Path(root).resolve()
+        # Do NOT resolve symlinks — the backend stores the raw path and
+        # path translation (host ↔ guest) relies on exact string matching.
+        # Resolving would break on macOS where /tmp → /private/tmp.
+        self.root = Path(root)
         self.cache = cache
         self.backend = backend
 

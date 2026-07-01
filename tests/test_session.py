@@ -97,7 +97,6 @@ async def test_session_saved_to_checkpointer(run_sh: Path) -> None:
             run_sh,
             "Hello! This is a test message for session persistence.",
         )
-
         logger.info("Session ID: %s", session_id)
         logger.info("Agent output:\n%s", client.all_text)
 
@@ -146,7 +145,6 @@ async def test_list_sessions_returns_created_session(run_sh: Path) -> None:
             run_sh,
             "Hello! This is a test session for list_sessions.",
         )
-
         logger.info("Session ID: %s", session_id)
         logger.info("Agent output:\n%s", client.all_text)
 
@@ -183,8 +181,8 @@ async def test_session_resumes_with_conversation_history(run_sh: Path) -> None:
             run_sh,
             f"My name is {name}. Please remember this.",
         )
-
         logger.info("First interaction output:\n%s", client.all_text)
+
         assert client.updates, "First interaction produced no updates"
 
         client_resumed = RecordingClient(prefix="acp_session_test_")
@@ -196,7 +194,6 @@ async def test_session_resumes_with_conversation_history(run_sh: Path) -> None:
                 "What is my name that I just told you? Answer with just the name.",
                 session_id=session_id,
             )
-
             logger.info("Resumed session: %s", resumed_session_id)
             logger.info("Second interaction output:\n%s", client_resumed.all_text)
 
@@ -230,13 +227,12 @@ async def test_session_isolation_between_cwds(run_sh: Path) -> None:
             run_sh,
             "This is session in directory two.",
         )
+        logger.info("Session 1 (%s) output:\n%s", session_id1, client1.all_text)
+        logger.info("Session 2 (%s) output:\n%s", session_id2, client2.all_text)
 
         assert client1.updates, "First session produced no updates"
         assert client2.updates, "Second session produced no updates"
         assert session_id1 != session_id2, "Session IDs should be unique"
-
-        logger.info("Session 1 (%s) output:\n%s", session_id1, client1.all_text)
-        logger.info("Session 2 (%s) output:\n%s", session_id2, client2.all_text)
 
         async with spawn_agent_process(
             client1,
@@ -287,10 +283,17 @@ async def test_session_replays_tool_calls(run_sh: Path) -> None:
 import subprocess
 from typing import Tuple
 
-from langchain_core.tools import tool
-
 
 def _run(cmd: str) -> Tuple[int, str]:
+    """Run a shell command, using the sandbox backend if available."""
+    backend = get_backend()
+    if backend is not None:
+        result = backend.execute(cmd)
+        output = result.output.strip()
+        return (
+            result.exit_code if result.exit_code is not None else 1,
+            output or f"exited {result.exit_code}",
+        )
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
     output = (result.stdout + result.stderr).strip()
     return (result.returncode, (output or f"exited {result.returncode}"))
@@ -313,8 +316,8 @@ def list_all_files(path: str) -> Tuple[int, str]:
             run_sh,
             "Use list_all_files tool skill to list files in the current directory.",
         )
-
         logger.info("First interaction output:\n%s", client_play.all_text)
+
         assert client_play.updates, "First interaction produced no updates"
 
         tool_calls_first = [
@@ -338,7 +341,6 @@ def list_all_files(path: str) -> Tuple[int, str]:
                 "Repeat the exact output from the tool.",
                 session_id=session_id,
             )
-
             logger.info("Resumed session: %s", resumed_session_id)
             logger.info("Second interaction output:\n%s", client_replay.all_text)
 

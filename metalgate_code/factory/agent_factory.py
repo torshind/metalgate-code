@@ -21,7 +21,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph.state import CompiledStateGraph
 
 from metalgate_code.config import get_interrupt_config
-from metalgate_code.context import get_code_tools
 from metalgate_code.memory.store import MemoryStore
 from metalgate_code.middleware import (
     CollectorMiddleware,
@@ -98,8 +97,10 @@ def _build_agent(
         logging.info(f"Loading AGENTS.md from {agents_md_path}")
         try:
             if shell_backend:
-                result = shell_backend.execute(f"cat {agents_md_path}")
-                agents_md_content = result.output
+                result = shell_backend.read(str(agents_md_path))
+                if result.error:
+                    raise OSError(f"Cannot read {agents_md_path}: {result.error}")
+                agents_md_content = result.file_data["content"]
             else:
                 with open(agents_md_path, "r", encoding="utf-8") as f:
                     agents_md_content = f.read()
@@ -141,8 +142,7 @@ def _build_agent(
         "\n"
         "## Tool Usage"
         "\n"
-        "CRITICAL: Before using `execute`, check if an available tool skill applies. "
-        "If a tool skill exists for the operation, use it instead of `execute`. "
+        "CRITICAL: Before trying anything else, check if an available tool skill applies. "
         "Tool skills are optimized for this project and handle environment/configuration automatically."
         "\n\n"
         "When navigating code, prefer the code tools (goto_definition, get_file_outline, "
@@ -162,6 +162,8 @@ def _build_agent(
         except Exception as e:
             logger.warning(f"Failed to initialize memory: {e}")
 
+    from metalgate_code.context import get_code_tools
+
     context_tools = get_code_tools(cwd=cwd, backend=shell_backend)
 
     return create_deep_agent(
@@ -172,7 +174,7 @@ def _build_agent(
             LocalContextMiddleware(backend=backend),
             RecollectorMiddleware(memory=memory),
             ToolSkillsMiddleware(),
-            DynamicToolsMiddleware(),
+            DynamicToolsMiddleware(backend=shell_backend),
             CollectorMiddleware(memory=memory),
         ],
         tools=META_SKILLS + context_tools,

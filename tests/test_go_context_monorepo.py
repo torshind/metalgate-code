@@ -10,12 +10,14 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from deepagents.backends import LocalShellBackend
 
 from metalgate_code.context import get_code_tools
+from metalgate_code.factory import MicrosandboxBackend
 
 MONOREPO_DIR = Path(__file__).parent / "sample" / "go" / "monorepo"
-SHARED_FILE = str(MONOREPO_DIR / "private" / "service" / "internal" / "shared" / "context.go")
+SHARED_FILE = str(
+    MONOREPO_DIR / "private" / "service" / "internal" / "shared" / "context.go"
+)
 CONTROLLER_FILE = str(MONOREPO_DIR / "private" / "service" / "api" / "controller.go")
 CLIENT_FILE = str(MONOREPO_DIR / "public" / "client" / "client.go")
 E2E_FILE = str(MONOREPO_DIR / "e2e-tests" / "suite" / "test.go")
@@ -29,9 +31,8 @@ def tools():
         db_path = f.name
 
     shell_env = os.environ.copy()
-    shell_backend = LocalShellBackend(
+    shell_backend = MicrosandboxBackend(
         root_dir=str(MONOREPO_DIR),
-        virtual_mode=False,
         env=shell_env,
         inherit_env=True,
     )
@@ -70,12 +71,15 @@ class TestGetFileOutline:
 
     def test_finds_function(self, tools):
         symbols = tools["get_file_outline"](CONTROLLER_FILE)
-        assert any(s["name"] == "NewController" and s["kind"] == "function" for s in symbols)
+        assert any(
+            s["name"] == "NewController" and s["kind"] == "function" for s in symbols
+        )
 
     def test_finds_method(self, tools):
         symbols = tools["get_file_outline"](CONTROLLER_FILE)
         method = next(
-            (s for s in symbols if s["name"] == "Publish" and s["kind"] == "method"), None
+            (s for s in symbols if s["name"] == "Publish" and s["kind"] == "method"),
+            None,
         )
         assert method is not None
 
@@ -86,8 +90,12 @@ class TestGetFileOutline:
 
     def test_finds_function_in_shared(self, tools):
         symbols = tools["get_file_outline"](SHARED_FILE)
-        assert any(s["name"] == "ToContext" and s["kind"] == "function" for s in symbols)
-        assert any(s["name"] == "FromContext" and s["kind"] == "function" for s in symbols)
+        assert any(
+            s["name"] == "ToContext" and s["kind"] == "function" for s in symbols
+        )
+        assert any(
+            s["name"] == "FromContext" and s["kind"] == "function" for s in symbols
+        )
 
     def test_cached_result_is_identical(self, tools):
         first = tools["get_file_outline"](CONTROLLER_FILE)
