@@ -37,7 +37,9 @@ from deepagents.backends.protocol import (
     SandboxBackendProtocol,
     WriteResult,
 )
-from microsandbox import Sandbox, Volume
+from microsandbox import Image, ImageNotFoundError, Sandbox, Volume
+
+from metalgate_code.factory.venv_manager import is_python_image as _is_python_image
 
 logger = logging.getLogger("metalgate_code")
 
@@ -56,6 +58,9 @@ The msb runtime occasionally hangs during VM boot (SDK-level race).
 When this happens, the msb process is already running but the Python
 SDK never receives the ready signal.  A shorter timeout lets the retry
 logic kick in quickly.
+
+The image is pre-cached at init (see :meth:`_precache_image`) so this
+timeout only covers VM boot, not image pulling.
 """
 
 SANDBOX_STOP_TIMEOUT_SEC = 30
@@ -75,33 +80,6 @@ _MAX_OUTPUT_BYTES = 100_000
 
 _PIPE_FIELD_COUNT = 2
 _GREP_FIELD_COUNT = 3
-
-# ------------------------------------------------------------------ #
-# Python venv management (architecture-mismatch handling)
-# ------------------------------------------------------------------ #
-
-_MS_VENV_DIR = ".venv-msb"
-"""Name of the guest-compatible venv created inside the bind mount.
-
-The user's own ``.venv`` is never modified.  When the host venv's
-architecture doesn't match the VM (e.g. macOS arm64 → Linux aarch64),
-we build a fresh venv here instead.
-"""
-
-_MS_VENV_MARKER = ".msb_built"
-"""Marker file inside ``_MS_VENV_DIR`` recording the build's VM arch
-and a hash of the project's dependency manifest, so we can skip
-rebuilds across sessions when nothing has changed.
-"""
-
-_VENV_SETUP_TIMEOUT_SEC = 300
-"""Timeout for the one-shot venv creation / dependency install step."""
-
-_VENV_REBUILD_TIMEOUT_SEC = 600
-"""Timeout for full dependency reinstall when the venv is stale."""
-
-_PYTHON_IMAGE_MARKERS = ("python", "uv:python", "uv")
-"""Substrings that identify a Python-capable image (for venv setup)."""
 
 
 def _run_async(coro):
@@ -138,8 +116,8 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         image: str = "python",
         env: dict[str, str] | None = None,
         inherit_env: bool = False,
-        cpus: int = 1,
-        memory: int = 1024,
+        cpus: int = 4,
+        memory: int = 4096,
         secrets: list | None = None,
         eager: bool = False,
     ) -> None:
@@ -148,7 +126,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         Args:
             root_dir: Host directory to bind-mount into the sandbox at
                 ``/workspace``.  This becomes the working directory for all
-                commands.
+                commands.  Must not be the root volume ``/``.
             image: OCI image to boot (e.g. ``"python"``, ``"ubuntu:24.04"``).
             env: Environment variables for the sandbox.  Merged on top of the
                 host environment when ``inherit_env=True``.
@@ -161,6 +139,11 @@ class MicrosandboxBackend(SandboxBackendProtocol):
                 constructor.  Otherwise it boots on first use.
         """
         self._root_dir = str(Path(root_dir))
+        if self._root_dir == "/":
+            raise ValueError(
+                "root_dir must not be '/': refusing to bind-mount the entire "
+                "root volume into the sandbox."
+            )
         self._image = image
         self._cpus = cpus
         self._memory = memory
@@ -185,10 +168,91 @@ class MicrosandboxBackend(SandboxBackendProtocol):
 
         if eager:
             _run_async(self._ensure_sandbox())
+        else:
+            _run_async(self._precache_image())
 
     # ------------------------------------------------------------------ #
     # Sandbox lifecycle
     # ------------------------------------------------------------------ #
+
+    async def _precache_image(self) -> None:
+        """Ensure the OCI image is cached locally before any VM boot.
+
+        ``Sandbox.create`` pulls the image on demand, but a pull during
+        creation competes with the short ``SANDBOX_CREATE_TIMEOUT_SEC``
+        guard and causes spurious timeouts.  By pre-caching here we keep
+        ``Sandbox.create`` fast (boot only, no network).
+        """
+        try:
+            await asyncio.wait_for(
+                Image.get(self._image), timeout=HEALTH_CHECK_TIMEOUT_SEC
+            )
+        except ImageNotFoundError:
+            logger.info("Pre-caching image %s (not in local cache)", self._image)
+            await self._pull_image()
+        except Exception:
+            pass  # Best-effort; let _create_sandbox surface real errors.
+
+    async def _pull_image(self) -> None:
+        """Pull the image via the ``msb image pull`` CLI command."""
+        proc = await asyncio.create_subprocess_exec(
+            "msb",
+            "image",
+            "pull",
+            self._image,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+
+    async def _kill_sandbox(self, name: str) -> None:
+        """Force-kill a sandbox that did not stop gracefully."""
+        try:
+            handle = await asyncio.wait_for(
+                Sandbox.get(name), timeout=HEALTH_CHECK_TIMEOUT_SEC
+            )
+            await handle.kill()
+            await asyncio.wait_for(
+                handle.wait_until_stopped(),
+                timeout=SANDBOX_STOP_TIMEOUT_SEC,
+            )
+        except Exception:
+            pass
+
+    async def _destroy_sandbox(self, name: str) -> None:
+        """Drain, stop (kill on failure), and remove a sandbox by name.
+
+        Encapsulates the full teardown sequence used by both :meth:`stop`
+        (for this instance's sandbox) and :meth:`_cleanup_stale_sandboxes`
+        (for leftover sandboxes from previous runs).
+        """
+        try:
+            handle = await asyncio.wait_for(
+                Sandbox.get(name), timeout=HEALTH_CHECK_TIMEOUT_SEC
+            )
+            if handle.status == "running":
+                await handle.request_drain()
+                await asyncio.wait_for(
+                    handle.wait_until_stopped(),
+                    timeout=SANDBOX_STOP_TIMEOUT_SEC,
+                )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Sandbox %s stop timed out after %ds, killing.",
+                name,
+                SANDBOX_STOP_TIMEOUT_SEC,
+            )
+            await self._kill_sandbox(name)
+        except Exception as e:
+            logger.warning("Sandbox %s stop failed: %s", name, e)
+            await self._kill_sandbox(name)
+
+        try:
+            await asyncio.wait_for(
+                Sandbox.remove(name), timeout=SANDBOX_STOP_TIMEOUT_SEC
+            )
+        except Exception:
+            pass
 
     async def _cleanup_stale_sandboxes(self) -> None:
         """Stop and remove any sandboxes left over from previous runs.
@@ -205,34 +269,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         except Exception:
             return
         for sb in sandboxes:
-            try:
-                handle = await asyncio.wait_for(
-                    Sandbox.get(sb.name), timeout=HEALTH_CHECK_TIMEOUT_SEC
-                )
-                if handle.status == "running":
-                    await handle.request_drain()
-                    await asyncio.wait_for(
-                        handle.wait_until_stopped(),
-                        timeout=SANDBOX_STOP_TIMEOUT_SEC,
-                    )
-                await asyncio.wait_for(
-                    Sandbox.remove(sb.name), timeout=SANDBOX_STOP_TIMEOUT_SEC
-                )
-            except Exception:
-                try:
-                    handle = await asyncio.wait_for(
-                        Sandbox.get(sb.name), timeout=HEALTH_CHECK_TIMEOUT_SEC
-                    )
-                    await handle.kill()
-                    await asyncio.wait_for(
-                        handle.wait_until_stopped(),
-                        timeout=SANDBOX_STOP_TIMEOUT_SEC,
-                    )
-                    await asyncio.wait_for(
-                        Sandbox.remove(sb.name), timeout=SANDBOX_STOP_TIMEOUT_SEC
-                    )
-                except Exception:
-                    pass
+            await self._destroy_sandbox(sb.name)
 
     async def _create_sandbox(self) -> Sandbox:
         """Create the microsandbox VM, retrying once on timeout.
@@ -299,288 +336,32 @@ class MicrosandboxBackend(SandboxBackendProtocol):
             # For Python images, ensure a guest-compatible venv exists.
             # The host .venv may be built for a different OS/arch (e.g.
             # macOS arm64) and won't run inside the Linux VM.
-            if self._is_python_image():
-                await self._ensure_python_venv(sb)
+            if _is_python_image(self._image):
+                from metalgate_code.factory.venv_manager import VenvManager
+
+                venv = VenvManager(
+                    sb,
+                    run_in_vm=self._run_in_vm,
+                    path_exists=self._path_exists,
+                    read_file_in_vm=self._read_file_in_vm,
+                    write_file_in_vm=self._write_file_in_vm,
+                )
+                self._venv_bin, self._venv_env = await venv.ensure()
 
             return sb
 
-    # ------------------------------------------------------------------ #
-    # Python venv management
-    # ------------------------------------------------------------------ #
-
-    def _is_python_image(self) -> bool:
-        """Whether the image is Python-capable (triggers venv setup)."""
-        img = self._image.lower()
-        return any(marker in img for marker in _PYTHON_IMAGE_MARKERS)
-
-    async def _ensure_python_venv(self, sb: Sandbox) -> None:
-        """Ensure a guest-compatible Python venv exists and activate it.
-
-        Never modifies the user's ``.venv``.  If the host venv is
-        arch-compatible, reuse it.  Otherwise build ``.venv-msb``:
-
-        - uv.lock present → install uv, create venv with ``uv venv``,
-          sync with ``uv sync``.
-        - otherwise → create venv with ``python3 -m venv``, install deps
-          with ``pip``.
-
-        A marker file records the VM arch + dep hash so we skip rebuilds
-        when nothing changed.
-        """
-        workdir = SANDBOX_WORKDIR
-        host_venv_bin = f"{workdir}/.venv/bin"
-
-        # Capture the VM's real PATH (env dict values aren't shell-expanded).
-        path_res = await self._run_in_vm(sb, "echo $PATH", timeout=10, env=None)
-        vm_path = path_res.output.strip() if path_res.exit_code == 0 else ""
-
-        # 1. Try the user's .venv — empirical arch check (runs inside VM).
-        if await self._path_exists(sb, f"{workdir}/.venv"):
-            check = await self._run_in_vm(
-                sb, f"{host_venv_bin}/python --version", timeout=30, env=None
-            )
-            if check.exit_code == 0:
-                logger.info("Reusing host .venv (arch-compatible) at %s", host_venv_bin)
-                self._venv_bin = host_venv_bin
-                self._venv_env = self._build_venv_env(host_venv_bin, vm_path)
-                return
-            logger.info(
-                "Host .venv is not guest-compatible (exit_code=%s); "
-                "building .venv-msb instead",
-                check.exit_code,
-            )
-
-        # 2. Build / refresh .venv-msb
-        ms_venv = f"{workdir}/{_MS_VENV_DIR}"
-        ms_venv_bin = f"{ms_venv}/bin"
-        marker = f"{ms_venv}/{_MS_VENV_MARKER}"
-
-        # Detect VM arch for the marker.
-        arch_res = await self._run_in_vm(sb, "uname -m", timeout=10, env=None)
-        vm_arch = arch_res.output.strip() if arch_res.exit_code == 0 else "unknown"
-
-        # Compute a hash of the dependency manifest so we rebuild on changes.
-        dep_hash = await self._dep_manifest_hash(sb, workdir)
-
-        # Check the marker: skip rebuild if arch + dep_hash match.
-        if await self._path_exists(sb, marker):
-            marker_content = await self._read_file_in_vm(sb, marker)
-            if marker_content and self._marker_matches(
-                marker_content, vm_arch, dep_hash
-            ):
-                logger.info(
-                    ".venv-msb up to date (arch=%s, hash=%s); reusing",
-                    vm_arch,
-                    dep_hash,
-                )
-                self._venv_bin = ms_venv_bin
-                self._venv_env = self._build_venv_env(ms_venv_bin, vm_path)
-                return
-            logger.info(".venv-msb stale (arch/deps changed); rebuilding")
-
-        # Remove stale venv.
-        await self._run_in_vm(
-            sb, f"rm -rf {shlex.quote(ms_venv)}", timeout=30, env=None
-        )
-
-        # Detect which dependency manifest exists.
-        manifest = await self._detect_manifest(sb, workdir)
-
-        if manifest is None:
-            logger.warning(
-                "No pyproject.toml, uv.lock, or requirements.txt found in %s; "
-                "skipping dependency install (empty venv).",
-                workdir,
-            )
-            return
-
-        if manifest == "uv.lock":
-            # Install uv into system Python, then use it for everything.
-            uv_install_res = await self._run_in_vm(
-                sb,
-                "python3 -m pip install uv",
-                timeout=_VENV_SETUP_TIMEOUT_SEC,
-                env=None,
-            )
-            if uv_install_res.exit_code != 0:
-                logger.warning(
-                    "uv install failed (exit %s): %s",
-                    uv_install_res.exit_code,
-                    uv_install_res.output[-2000:],
-                )
-                return
-
-            # Create venv with uv (respects .python-version).
-            venv_res = await self._run_in_vm(
-                sb,
-                f"uv venv {shlex.quote(ms_venv)}",
-                timeout=_VENV_SETUP_TIMEOUT_SEC,
-                env=None,
-            )
-            if venv_res.exit_code != 0:
-                logger.warning(
-                    "venv creation failed (exit %s): %s",
-                    venv_res.exit_code,
-                    venv_res.output[-2000:],
-                )
-                return
-
-            # Sync dependencies from uv.lock (including dev group for ty, etc).
-            py = shlex.quote(f"{ms_venv}/bin/python")
-            sync_cmd = (
-                f"cd {shlex.quote(workdir)} && "
-                f"VIRTUAL_ENV={shlex.quote(ms_venv)} "
-                f"PATH={shlex.quote(ms_venv_bin)}:$PATH "
-                f"UV_PROJECT_ENVIRONMENT={shlex.quote(ms_venv)} "
-                f"uv sync --all-groups --python {py}"
-            )
-            sync_res = await self._run_in_vm(
-                sb,
-                sync_cmd,
-                timeout=_VENV_REBUILD_TIMEOUT_SEC,
-                env=None,
-            )
-            if sync_res.exit_code != 0:
-                logger.warning(
-                    "uv sync failed (exit %s): %s",
-                    sync_res.exit_code,
-                    sync_res.output[-2000:],
-                )
-                return
-            logger.info("Dependencies installed into .venv-msb via uv sync")
-
-            # Install uv into the venv so skills can find it via PATH.
-            # uv venv creates venvs without pip, so use uv pip install
-            # (uv's own installer) instead of python -m pip.
-            uv_venv_res = await self._run_in_vm(
-                sb,
-                f"VIRTUAL_ENV={shlex.quote(ms_venv)} "
-                f"UV_PROJECT_ENVIRONMENT={shlex.quote(ms_venv)} "
-                f"uv pip install uv --python {py}",
-                timeout=_VENV_SETUP_TIMEOUT_SEC,
-                env=None,
-            )
-            if uv_venv_res.exit_code != 0:
-                logger.warning(
-                    "uv install into .venv-msb failed (exit %s): %s",
-                    uv_venv_res.exit_code,
-                    uv_venv_res.output[-2000:],
-                )
-            else:
-                logger.info("uv installed into .venv-msb")
-
-        else:
-            # No uv.lock — create venv with python3 -m venv, install with pip.
-            venv_res = await self._run_in_vm(
-                sb,
-                f"python3 -m venv {shlex.quote(ms_venv)}",
-                timeout=_VENV_SETUP_TIMEOUT_SEC,
-                env=None,
-            )
-            if venv_res.exit_code != 0:
-                logger.warning(
-                    "venv creation failed (exit %s): %s",
-                    venv_res.exit_code,
-                    venv_res.output[-2000:],
-                )
-                return
-            else:
-                install_cmd = self._build_pip_install_cmd(workdir, ms_venv, manifest)
-                res = await self._run_in_vm(
-                    sb,
-                    install_cmd,
-                    timeout=_VENV_REBUILD_TIMEOUT_SEC,
-                    env=None,
-                )
-                if res.exit_code != 0:
-                    logger.warning(
-                        "Dependency install into .venv-msb failed (exit %s): %s",
-                        res.exit_code,
-                        res.output[-2000:],
-                    )
-                    return
-                logger.info("Dependencies installed into .venv-msb via pip")
-
-        # Write the marker.
-        marker_body = f"arch={vm_arch}\ndeps={dep_hash}\n"
-        await self._write_file_in_vm(sb, marker, marker_body)
-
-        self._venv_bin = ms_venv_bin
-        self._venv_env = self._build_venv_env(ms_venv_bin, vm_path)
-
-    def _build_venv_env(self, venv_bin: str, base_path: str) -> dict[str, str]:
-        """Build the env dict that activates a venv for ``sb.shell(env=...)``.
-
-        ``base_path`` is the VM's real ``$PATH`` (captured during venv
-        setup), since env dict values are not shell-expanded.
-        """
-        venv_dir = str(Path(venv_bin).parent)
-        return {
-            "VIRTUAL_ENV": venv_dir,
-            "PATH": f"{venv_bin}:{base_path}",
-            "UV_PROJECT_ENVIRONMENT": venv_dir,
-            "UV_NO_SYNC": "1",
-        }
-
-    async def _detect_manifest(self, sb: Sandbox, workdir: str) -> str | None:
-        """Return the name of the dependency manifest that exists, or None.
-
-        Preference order: ``uv.lock`` → ``pyproject.toml`` →
-        ``requirements.txt``.  Only the first existing one is returned.
-        """
-        for manifest in ("uv.lock", "pyproject.toml", "requirements.txt"):
-            if await self._path_exists(sb, f"{workdir}/{manifest}"):
-                return manifest
-        return None
-
-    def _build_pip_install_cmd(self, workdir: str, venv: str, manifest: str) -> str:
-        """Build a ``pip install`` command for the given manifest.
-
-        Used when ``uv.lock`` is not present.  ``manifest`` is either
-        ``pyproject.toml`` or ``requirements.txt``.
-        """
-        py = shlex.quote(f"{venv}/bin/python")
-        activate = (
-            f"VIRTUAL_ENV={shlex.quote(venv)} PATH={shlex.quote(venv + '/bin')}:$PATH"
-        )
-        cd = f"cd {shlex.quote(workdir)} && "
-        if manifest == "pyproject.toml":
-            return f"{cd}{activate} {py} -m pip install -e ."
-        return (
-            f"{cd}{activate} {py} -m pip install "
-            f"-r {shlex.quote(workdir + '/requirements.txt')}"
-        )
-
-    async def _dep_manifest_hash(self, sb: Sandbox, workdir: str) -> str:
-        """Hash of the project's dependency manifest (uv.lock or pyproject.toml)."""
-        # Hash uv.lock if present (most representative), else pyproject.toml.
-        for manifest in ("uv.lock", "pyproject.toml", "requirements.txt"):
-            path = f"{workdir}/{manifest}"
-            if await self._path_exists(sb, path):
-                res = await self._run_in_vm(
-                    sb,
-                    f"sha256sum {shlex.quote(path)} 2>/dev/null || true",
-                    timeout=15,
-                    env=None,
-                )
-                h = res.output.strip().split()[0] if res.output else ""
-                if h:
-                    return f"{manifest}:{h[:16]}"
-        return "none"
+    # -- low-level VM helpers (thin wrappers over sb.shell) ------------ #
 
     @staticmethod
-    def _marker_matches(marker: str, arch: str, dep_hash: str) -> bool:
-        """Check whether a marker file matches the current arch + dep hash."""
-        arch_match = False
-        hash_match = False
-        for line in marker.splitlines():
-            if line.startswith("arch=") and line[5:].strip() == arch:
-                arch_match = True
-            elif line.startswith("deps=") and line[5:].strip() == dep_hash:
-                hash_match = True
-        return arch_match and hash_match
-
-    # -- low-level VM helpers (thin wrappers over sb.shell) ------------ #
+    def _format_output(result) -> str:
+        """Combine stdout and stderr, prefixing stderr lines with ``[stderr]``."""
+        parts = []
+        if result.stdout_text:
+            parts.append(result.stdout_text)
+        if result.stderr_text:
+            for line in result.stderr_text.strip().split("\n"):
+                parts.append(f"[stderr] {line}")
+        return "\n".join(parts) if parts else ""
 
     async def _run_in_vm(
         self,
@@ -588,7 +369,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         command: str,
         *,
         timeout: int,
-        env: dict[str, str] | None,
+        env: dict[str, str] | None = None,
     ) -> ExecuteResponse:
         """Run a command in the VM and return an ExecuteResponse.
 
@@ -597,55 +378,47 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         - ``None``: pass None explicitly (inherit VM's default env).
         - a dict: use that dict directly.
         """
-        if env == "default":
+        if env is None:
             env = self._venv_env
         try:
-            result = await asyncio.wait_for(
-                sb.shell(
-                    command,
-                    cwd=SANDBOX_WORKDIR,
-                    env=env,
-                    timeout=float(timeout),
-                ),
-                timeout=timeout + 10,
-            )
-        except asyncio.TimeoutError:
-            return ExecuteResponse(
-                output=f"Error: timed out after {timeout}s",
-                exit_code=124,
-                truncated=False,
+            result = await sb.shell(
+                command,
+                cwd=SANDBOX_WORKDIR,
+                env=env,
+                timeout=float(timeout),
             )
         except Exception as e:
             return ExecuteResponse(
                 output=f"Error: {type(e).__name__}: {e}", exit_code=1, truncated=False
             )
 
-        output_parts = []
-        if result.stdout_text:
-            output_parts.append(result.stdout_text)
-        if result.stderr_text:
-            for line in result.stderr_text.strip().split("\n"):
-                output_parts.append(f"[stderr] {line}")
-        output = "\n".join(output_parts) if output_parts else ""
         return ExecuteResponse(
-            output=output, exit_code=result.exit_code, truncated=False
+            output=self._format_output(result),
+            exit_code=result.exit_code,
+            truncated=False,
         )
+
+    async def _fs(self, sb: Sandbox, coro, *, timeout: int = FS_OP_TIMEOUT_SEC):
+        """Run a filesystem operation on the VM with the standard FS timeout.
+
+        Centralizes the ``asyncio.wait_for`` wrapper so call sites don't
+        repeat ``timeout=FS_OP_TIMEOUT_SEC`` at every ``sb.fs.*`` call.
+        Callers handle their own exceptions (returning ``False``, ``None``,
+        or a typed ``Result(error=...)`` as appropriate).
+        """
+        return await asyncio.wait_for(coro, timeout=timeout)
 
     async def _path_exists(self, sb: Sandbox, guest_path: str) -> bool:
         """Check if a path exists inside the VM via the filesystem API."""
         try:
-            return await asyncio.wait_for(
-                sb.fs.exists(guest_path), timeout=FS_OP_TIMEOUT_SEC
-            )
+            return await self._fs(sb, sb.fs.exists(guest_path))
         except Exception:
             return False
 
     async def _read_file_in_vm(self, sb: Sandbox, guest_path: str) -> str | None:
         """Read a small text file from the VM."""
         try:
-            raw = await asyncio.wait_for(
-                sb.fs.read(guest_path), timeout=FS_OP_TIMEOUT_SEC
-            )
+            raw = await self._fs(sb, sb.fs.read(guest_path))
             return raw.decode("utf-8", errors="replace")
         except Exception:
             return None
@@ -657,14 +430,11 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         parent = str(Path(guest_path).parent)
         if parent and parent != "/":
             try:
-                await asyncio.wait_for(sb.fs.mkdir(parent), timeout=FS_OP_TIMEOUT_SEC)
+                await self._fs(sb, sb.fs.mkdir(parent))
             except Exception:
                 pass
         try:
-            await asyncio.wait_for(
-                sb.fs.write(guest_path, content.encode("utf-8")),
-                timeout=FS_OP_TIMEOUT_SEC,
-            )
+            await self._fs(sb, sb.fs.write(guest_path, content.encode("utf-8")))
         except Exception as e:
             logger.warning("Failed to write %s in VM: %s", guest_path, e)
 
@@ -691,45 +461,10 @@ class MicrosandboxBackend(SandboxBackendProtocol):
 
     async def stop(self) -> None:
         """Stop and clean up the sandbox VM."""
-        if self._sandbox is not None:
-            self._sandbox = None
-            try:
-                handle = await asyncio.wait_for(
-                    Sandbox.get(self._sandbox_id),
-                    timeout=HEALTH_CHECK_TIMEOUT_SEC,
-                )
-                await handle.request_drain()
-                await asyncio.wait_for(
-                    handle.wait_until_stopped(),
-                    timeout=SANDBOX_STOP_TIMEOUT_SEC,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Sandbox %s stop timed out after %ds, killing.",
-                    self._sandbox_id,
-                    SANDBOX_STOP_TIMEOUT_SEC,
-                )
-                try:
-                    handle = await asyncio.wait_for(
-                        Sandbox.get(self._sandbox_id),
-                        timeout=HEALTH_CHECK_TIMEOUT_SEC,
-                    )
-                    await handle.kill()
-                    await asyncio.wait_for(
-                        handle.wait_until_stopped(),
-                        timeout=SANDBOX_STOP_TIMEOUT_SEC,
-                    )
-                except Exception:
-                    pass
-            except Exception as e:
-                logger.warning("Sandbox %s stop failed: %s", self._sandbox_id, e)
-            try:
-                await asyncio.wait_for(
-                    Sandbox.remove(self._sandbox_id),
-                    timeout=SANDBOX_STOP_TIMEOUT_SEC,
-                )
-            except Exception:
-                pass
+        if self._sandbox is None:
+            return
+        self._sandbox = None
+        await self._destroy_sandbox(self._sandbox_id)
 
     # ------------------------------------------------------------------ #
     # Properties
@@ -744,6 +479,32 @@ class MicrosandboxBackend(SandboxBackendProtocol):
     def cwd(self) -> str:
         """Working directory inside the sandbox."""
         return SANDBOX_WORKDIR
+
+    @property
+    def venv_bin(self) -> str | None:
+        """Path to the guest-compatible venv's ``bin`` directory, or ``None``.
+
+        Established by :class:`~metalgate_code.factory.venv_manager.VenvManager`
+        during sandbox boot when the image is Python-capable.  When set,
+        commands run with the venv activated (see :attr:`venv_env`).
+        """
+        return self._venv_bin
+
+    @property
+    def venv_dir(self) -> str | None:
+        """Name of the guest-compatible venv's directory (e.g. ``.venv`` or
+        ``.venv-msb``), or ``None`` if no venv was established.
+
+        Derived from :attr:`venv_bin`` — the parent directory's basename.
+        """
+        if self._venv_bin is None:
+            return None
+        return Path(self._venv_bin).parent.name
+
+    @property
+    def venv_env(self) -> dict[str, str] | None:
+        """Env dict that activates :attr:`venv_bin`, or ``None`` if no venv."""
+        return self._venv_env
 
     # ------------------------------------------------------------------ #
     # Command execution
@@ -803,38 +564,13 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         sb_command = self._to_guest_path(command)
         logger.debug(f"Executing command: {sb_command}")
 
-        try:
-            result = await asyncio.wait_for(
-                sb.shell(
-                    sb_command,
-                    cwd=SANDBOX_WORKDIR,
-                    env=self._venv_env,
-                    timeout=float(effective_timeout),
-                ),
-                timeout=effective_timeout + 10,
-            )
-        except asyncio.TimeoutError:
-            return ExecuteResponse(
-                output=f"Error: Command timed out after {effective_timeout}s.",
-                exit_code=124,
-                truncated=False,
-            )
-        except Exception as e:
-            return ExecuteResponse(
-                output=f"Error executing command ({type(e).__name__}): {e}",
-                exit_code=1,
-                truncated=False,
-            )
+        result = await self._run_in_vm(
+            sb,
+            sb_command,
+            timeout=effective_timeout,
+        )
 
-        # Combine stdout and stderr, prefixing stderr lines with [stderr].
-        output_parts = []
-        if result.stdout_text:
-            output_parts.append(result.stdout_text)
-        if result.stderr_text:
-            stderr_lines = result.stderr_text.strip().split("\n")
-            output_parts.extend(f"[stderr] {line}" for line in stderr_lines)
-
-        output = "\n".join(output_parts) if output_parts else "<no output>"
+        output = result.output or "<no output>"
 
         # Truncation
         truncated = False
@@ -886,9 +622,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         guest_path = self._resolve_guest_path(file_path)
 
         try:
-            raw = await asyncio.wait_for(
-                sb.fs.read(guest_path), timeout=FS_OP_TIMEOUT_SEC
-            )
+            raw = await self._fs(sb, sb.fs.read(guest_path))
         except Exception as e:
             return ReadResult(error=f"Error reading file '{file_path}': {e}")
 
@@ -942,9 +676,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
 
         # Check if file already exists
         try:
-            exists = await asyncio.wait_for(
-                sb.fs.exists(guest_path), timeout=FS_OP_TIMEOUT_SEC
-            )
+            exists = await self._fs(sb, sb.fs.exists(guest_path))
         except Exception:
             exists = False
 
@@ -958,15 +690,12 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         parent = str(Path(guest_path).parent)
         if parent and parent != "/":
             try:
-                await asyncio.wait_for(sb.fs.mkdir(parent), timeout=FS_OP_TIMEOUT_SEC)
+                await self._fs(sb, sb.fs.mkdir(parent))
             except Exception:
                 pass  # May already exist
 
         try:
-            await asyncio.wait_for(
-                sb.fs.write(guest_path, content.encode("utf-8")),
-                timeout=FS_OP_TIMEOUT_SEC,
-            )
+            await self._fs(sb, sb.fs.write(guest_path, content.encode("utf-8")))
         except Exception as e:
             return WriteResult(error=f"Error writing file '{file_path}': {e}")
 
@@ -1000,9 +729,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         guest_path = self._resolve_guest_path(file_path)
 
         try:
-            raw = await asyncio.wait_for(
-                sb.fs.read(guest_path), timeout=FS_OP_TIMEOUT_SEC
-            )
+            raw = await self._fs(sb, sb.fs.read(guest_path))
         except Exception as e:
             return EditResult(error=f"Error: File '{file_path}' not found: {e}")
 
@@ -1031,10 +758,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         )
 
         try:
-            await asyncio.wait_for(
-                sb.fs.write(guest_path, result_text.encode("utf-8")),
-                timeout=FS_OP_TIMEOUT_SEC,
-            )
+            await self._fs(sb, sb.fs.write(guest_path, result_text.encode("utf-8")))
         except Exception as e:
             return EditResult(error=f"Error editing file '{file_path}': {e}")
 
@@ -1062,9 +786,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         guest_path = self._resolve_guest_path(path)
 
         try:
-            entries = await asyncio.wait_for(
-                sb.fs.list(guest_path), timeout=FS_OP_TIMEOUT_SEC
-            )
+            entries = await self._fs(sb, sb.fs.list(guest_path))
         except Exception as e:
             return LsResult(error=f"Path '{path}': {e}", entries=None)
 
@@ -1199,16 +921,12 @@ class MicrosandboxBackend(SandboxBackendProtocol):
             parent = str(Path(guest_path).parent)
             if parent and parent != "/":
                 try:
-                    await asyncio.wait_for(
-                        sb.fs.mkdir(parent), timeout=FS_OP_TIMEOUT_SEC
-                    )
+                    await self._fs(sb, sb.fs.mkdir(parent))
                 except Exception:
                     pass
 
             try:
-                await asyncio.wait_for(
-                    sb.fs.write(guest_path, content), timeout=FS_OP_TIMEOUT_SEC
-                )
+                await self._fs(sb, sb.fs.write(guest_path, content))
                 results.append(FileUploadResponse(path=path, error=None))
             except Exception as e:
                 error = _map_exception_to_standard_error(e)
@@ -1230,9 +948,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         for path in paths:
             guest_path = self._resolve_guest_path(path)
             try:
-                content = await asyncio.wait_for(
-                    sb.fs.read(guest_path), timeout=FS_OP_TIMEOUT_SEC
-                )
+                content = await self._fs(sb, sb.fs.read(guest_path))
                 results.append(
                     FileDownloadResponse(path=path, content=content, error=None)
                 )

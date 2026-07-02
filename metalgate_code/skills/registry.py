@@ -44,7 +44,7 @@ class SkillRegistry:
             result = self._backend.read(str(path))
             if result.error:
                 raise FileNotFoundError(f"Cannot read {path}: {result.error}")
-            return result.file_data["content"]
+            return result.file_data["content"] if result.file_data else ""
         return path.read_text()
 
     def reload(self):

@@ -9,6 +9,15 @@ import pytest
 from acp.schema import ToolCallStart
 
 from metalgate_code.context import get_code_tools
+from metalgate_code.context.python_tracer import (
+    _lsp_symbol_kind_to_str,
+    _name_col_on_line,
+    _parse_hover,
+    _ts_call_positions,
+    _ts_find_function_containing,
+    _ts_find_scope_at_line,
+    _uri_to_path,
+)
 from metalgate_code.factory import MicrosandboxBackend
 from tests.conftest import RecordingClient, run_agent
 
@@ -274,7 +283,9 @@ class TestFindSymbol:
 
     def test_unknown_symbol_returns_empty_list(self, tools):
         results = tools["find_symbol"]("zzz_does_not_exist_xyz")
-        assert results == []
+        # No project symbol found — returns a hint entry, not an empty list.
+        assert len(results) == 1
+        assert "note" in results[0]
 
     def test_finds_class_by_name(self, tools):
         results = tools["find_symbol"]("Order")
@@ -285,16 +296,6 @@ class TestFindSymbol:
 # --------------------------------------------------------------------------- #
 # Unit tests for module-level helper functions (no sandbox/LSP required)
 # --------------------------------------------------------------------------- #
-
-from metalgate_code.context.python_tracer import (
-    _call_positions,
-    _lsp_symbol_kind_to_str,
-    _name_col_on_line,
-    _parse_hover,
-    _ts_find_function_containing,
-    _ts_find_scope_at_line,
-    _uri_to_path,
-)
 
 
 class TestUriToPathPercentDecoding:
@@ -346,29 +347,36 @@ class TestNameColOnLineMultipleOccurrences:
 
 
 class TestCallPositionsFalsePositives:
-    """Reproduces #16: _call_positions matched decorators and class definitions."""
+    """Reproduces #16: _call_positions matched decorators and class definitions.
+
+    Now uses _ts_call_positions (tree-sitter AST-based).  The old
+    tokenize-based _call_positions was replaced because it relied on
+    manual heuristics to skip decorators/class-defs/def-line; the
+    tree-sitter version naturally excludes them because they are not
+    ``call`` nodes within the function body.
+    """
 
     def test_skips_decorator_lines(self):
         source = "@deco\ndef func():\n    pass\n"
         # start_line=2 is the def line (as tree-sitter would report)
-        positions = _call_positions(source, 2, 3, func_name="func")
+        positions = _ts_call_positions(source.encode("utf-8"), 2, 3)
         # @deco should NOT be treated as a call
         assert positions == []
 
     def test_skips_class_definition_base_list(self):
         source = "class Foo(Bar):\n    pass\n"
-        positions = _call_positions(source, 1, 2)
+        positions = _ts_call_positions(source.encode("utf-8"), 1, 2)
         # 'Bar' in class definition should NOT be treated as a call
         assert positions == []
 
     def test_finds_real_calls(self):
         source = "def func():\n    foo()\n    bar()\n"
-        positions = _call_positions(source, 1, 3, func_name="func")
+        positions = _ts_call_positions(source.encode("utf-8"), 1, 3)
         assert len(positions) == 2
 
     def test_skips_function_name_on_def_line(self):
         source = "def foo():\n    foo()\n"
-        positions = _call_positions(source, 1, 2, func_name="foo")
+        positions = _ts_call_positions(source.encode("utf-8"), 1, 2)
         # Only the call on line 2, not the def on line 1
         assert len(positions) == 1
         assert positions[0][0] == 2
