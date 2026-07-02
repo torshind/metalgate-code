@@ -27,6 +27,10 @@ def make_tools(tracer: Tracer) -> list:
         Start here whenever you encounter a call or import you want to
         understand. Cheap: result is cached after the first call.
 
+        When the language server can't resolve a symbol directly (e.g.
+        conditional imports, type annotations), falls back to a workspace
+        symbol search by name.
+
         Args:
             file: Absolute or project-relative path to the source file.
             line: 1-indexed line number where the symbol appears.
@@ -81,18 +85,21 @@ def make_tools(tracer: Tracer) -> list:
         Use after goto_definition or get_file_outline to read the actual
         implementation of a symbol — including library code in site-packages.
 
+        The returned dict includes a ``fallback`` boolean: ``False`` when a
+        precise scope was found, ``True`` when only a context window was used.
+
         Args:
             file:    Path to the file.
             line:    1-indexed line of the `def` or `class` statement.
             context: Fallback window size in lines (default 60).
 
         Returns a dict with keys:
-            file, start_line, end_line, source (the code as a string)
+            file, start_line, end_line, source, fallback
 
         Example:
             # validate_address lives at src/validation.py:34
             get_source("src/validation.py", 34)
-            # → {"start_line": 34, "end_line": 41,
+            # → {"start_line": 34, "end_line": 41, "fallback": false,
             #    "source": "def validate_address(addr: dict) -> bool:\n ..."}
         """
         return tracer.get_source(file, line, context)
@@ -106,12 +113,17 @@ def make_tools(tracer: Tracer) -> list:
         where a function is invoked from.  Capped at 50 results; times out
         gracefully on very large repos.
 
+        When no static callers are found, returns a single entry with a
+        ``note`` field explaining that the symbol may be called via dynamic
+        dispatch, framework callbacks, or from site-packages.
+
         Args:
             file: Path to the file containing the definition.
             line: 1-indexed line of the `def` or `class` statement.
 
         Returns a list of dicts with keys:
             file, line, name, caller, context
+        May include a ``note`` key when no callers were found.
 
         ``name`` is the symbol being referenced; ``caller`` is the
         innermost function or class that contains the reference.
@@ -136,6 +148,10 @@ def make_tools(tracer: Tracer) -> list:
         This is the primary tool for following a call trail deeper into the
         codebase.  Pair with get_source to read the body of each callee.
 
+        Results are deduplicated by name: when the same method appears via
+        both an abstract declaration and a concrete implementation, only the
+        concrete one is kept.
+
         Args:
             file: Path to the file containing the function definition.
             line: 1-indexed line of the `def` statement.
@@ -152,23 +168,31 @@ def make_tools(tracer: Tracer) -> list:
 
     def find_symbol(name: str) -> list[dict]:
         """
-        Search for a symbol by exact name across the project and installed
-        packages.
+        Search for a symbol by exact name across the project.
 
         Use when you know a function or class name but not which file it lives
         in.  If you need the signature, call ``get_file_outline`` on the
         returned file afterwards.
 
+        This searches project files only (via the language server's workspace
+        symbol index).  For symbols in installed packages, use
+        ``goto_definition`` from a usage site instead — it resolves directly
+        to the definition in site-packages.
+
+        When no project symbols are found, returns a single entry with a
+        ``note`` field suggesting ``goto_definition`` as an alternative.
+
         Args:
-            name: Exact symbol name (e.g. "validate_address", "DataFrame").
+            name: Exact symbol name (e.g. "validate_address", "MyClass").
 
         Returns a list of dicts with keys:
             name, kind, file, line
+        May include a ``note`` key when no symbols were found.
 
         Example:
-            find_symbol("DataFrame")
-            # → [{"name": "DataFrame", "kind": "class",
-            #      "file": ".venv/lib/.../pandas/core/frame.py", "line": 517}]
+            find_symbol("validate_address")
+            # → [{"name": "validate_address", "kind": "function",
+            #      "file": "src/validation.py", "line": 34}]
         """
         return tracer.find_symbol(name)
 

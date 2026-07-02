@@ -101,7 +101,7 @@ def web_search(query: str, num: int = 10) -> dict:
 #
 def _run(cmd: str) -> Tuple[int, str]:
     """Run a shell command, using the sandbox backend if available."""
-    backend = get_backend()
+    backend = get_backend()  # ty: ignore[unresolved-reference]  # injected at runtime via exec
     if backend is not None:
         result = backend.execute(cmd)
         output = result.output.strip()
@@ -166,6 +166,10 @@ def list_all_files(path: str) -> Tuple[int, str]:
 def run_ty(cwd: str, ty_args: str) -> Tuple[int, str]:
     """Run ty (type checking) with arguments.
     cwd = path to the project root.
-    ty_args = ty command arguments.
+    ty_args = arguments passed to `ty check` (the `check` subcommand is
+        already included; do NOT repeat it). Examples:
+        - a single file: "metalgate_code/context/python_tracer.py"
+        - a directory: "metalgate_code/"
+        - with options: "--python 3.12 metalgate_code/"
     Returns a tuple of (returncode, output)."""
     return _run(f"uv run --directory {cwd} ty check {ty_args}")

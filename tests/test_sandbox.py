@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import textwrap
+from collections.abc import AsyncGenerator
 from pathlib import Path
 
 import pytest
@@ -31,7 +32,7 @@ def workspace(tmp_path: Path) -> Path:
 
 
 @pytest_asyncio.fixture
-async def backend(workspace: Path) -> MicrosandboxBackend:
+async def backend(workspace: Path) -> AsyncGenerator[MicrosandboxBackend, None]:
     """Create a real MicrosandboxBackend, boot the VM, and tear it down after."""
     b = MicrosandboxBackend(root_dir=str(workspace), memory=1024)
     yield b
@@ -48,8 +49,8 @@ class TestInit:
     async def test_defaults(self, workspace: Path):
         b = MicrosandboxBackend(root_dir=str(workspace))
         assert b._image == "python"
-        assert b._cpus == 1
-        assert b._memory == 1024
+        assert b._cpus == 4
+        assert b._memory == 4096
         assert b._env == {}
         assert b._secrets == []
         assert b._sandbox is None
@@ -127,6 +128,7 @@ class TestSandboxLifecycle:
     async def test_ensure_sandbox_idempotent_under_concurrency(self, workspace: Path):
         b = MicrosandboxBackend(root_dir=str(workspace), memory=1024)
         import asyncio
+
         try:
             sb1, sb2 = await asyncio.gather(
                 b._ensure_sandbox(),
@@ -184,7 +186,7 @@ class TestExecute:
         assert "non-empty string" in result.output
 
     async def test_aexecute_non_string_command(self, backend: MicrosandboxBackend):
-        result = await backend.aexecute(123)  # type: ignore[arg-type]
+        result = await backend.aexecute(123)  # ty: ignore[invalid-argument-type]
         assert result.exit_code == 1
         assert "non-empty string" in result.output
 
@@ -527,9 +529,7 @@ class TestLs:
         assert result.entries is not None
         # The backend may create internal directories (e.g. .venv-msb) in
         # the workspace; filter those out to check there are no user files.
-        user_entries = [
-            e for e in result.entries if ".venv-msb" not in e["path"]
-        ]
+        user_entries = [e for e in result.entries if ".venv-msb" not in e["path"]]
         assert len(user_entries) == 0
 
     async def test_als_is_dir_flag(self, backend: MicrosandboxBackend, workspace: Path):
@@ -537,6 +537,7 @@ class TestLs:
         (workspace / "adir").mkdir()
         result = await backend.als(".")
         assert result.error is None
+        assert result.entries is not None
         for entry in result.entries:
             if "adir" in entry["path"]:
                 assert entry["is_dir"] is True

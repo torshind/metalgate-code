@@ -4,19 +4,20 @@ Replaces the former jedi/parso-based implementation with Astral's ``ty``
 language server, run as a subprocess inside the microsandbox VM.  LSP
 communication is handled by :class:`~metalgate_code.context.ty_lsp_client.TyLspClient`.
 
+``find_symbol`` uses LSP ``workspace/symbol`` — project files only, not
+site-packages (confirmed from ty 0.0.55 source).  For third-party symbols,
+use ``goto_definition`` from a usage site.
+
 Tree-sitter is retained for:
-  - ``find_symbol`` — fast exact symbol search across project and site-packages
   - ``get_source`` — line-based source extraction from tree-sitter scope nodes
   - ``get_file_outline`` — fast outline extraction (no LSP round-trip needed)
 """
 
 from __future__ import annotations
 
-import io
 import logging
 import re
 import threading
-import tokenize
 import urllib.parse
 from pathlib import Path
 from typing import Optional
@@ -31,9 +32,7 @@ from metalgate_code.factory.microsandbox_backend import MicrosandboxBackend
 
 logger = logging.getLogger("metalgate_code")
 
-_PYCACHE = "__pycache__"
-_VENV_DIR = ".venv"
-_STDLIB_MARKERS = ("typeshed", "/stdlib/", "/logging/", "/builtins.pyi")
+_STDLIB_MARKERS = ("typeshed", "/stdlib/", "/builtins.pyi")
 
 # Tree-sitter language — parsers are created per-call for thread safety.
 _TS_LANGUAGE = Language(tspython.language())
@@ -72,30 +71,6 @@ _LSP_SYMBOL_KINDS = {
 def _ts_parse(source_bytes: bytes):
     """Parse *source_bytes* with a fresh per-call Parser (thread-safe)."""
     return Parser(_TS_LANGUAGE).parse(source_bytes)
-
-
-class _TreeCache:
-    """Short-lived in-memory cache for tree-sitter parse results.
-
-    Keyed by (file, mtime).  Avoids redundant re-parses within a single
-    tool invocation that reads the same file multiple times.
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._entry: Optional[tuple[str, float, object]] = None
-
-    def get(self, file: str, mtime: float):
-        with self._lock:
-            if self._entry is not None:
-                cached_file, cached_mtime, tree = self._entry
-                if cached_file == file and cached_mtime == mtime:
-                    return tree
-            return None
-
-    def set(self, file: str, mtime: float, tree) -> None:
-        with self._lock:
-            self._entry = (file, mtime, tree)
 
 
 def _ts_find_scope_at_line(source_bytes: bytes, line: int) -> Optional[tuple[int, int]]:
@@ -164,78 +139,48 @@ def _ts_find_function_containing(
     return (best[0], best[1], best_name)
 
 
-def _call_positions(
-    source: str, start_line: int, end_line: int, func_name: str | None = None
+def _ts_call_positions(
+    source_bytes: bytes, start_line: int, end_line: int
 ) -> list[tuple[int, int]]:
-    """Return (line, col) of every NAME token followed by '(' in [start_line, end_line].
+    """Return (line_1based, col_0based) of every function call in [start_line, end_line].
 
-    If *func_name* is given, skip the token when it is *func_name* on the
-    function's own definition line (avoids treating ``def foo(...):`` as a
-    call to ``foo``).
+    Walks the tree-sitter AST to find ``call`` nodes.  For each call:
+      - ``foo()``    → position of ``foo`` (identifier)
+      - ``obj.m()``  → position of ``m`` (attribute's identifier)
+      - other        → position of the function expression
 
-    Also skips:
-      - Decorator lines (``@decorator(...)``) — the ``@`` prefix means the
-        name is not a call within the function body.
-      - Class definition lines (``class Foo(Bar)``) — the class name and
-        base class list are not function calls.
+    Decorators, class definitions, and the function's own definition line
+    are naturally excluded — they are not ``call`` nodes within the
+    function body.
     """
+    tree = _ts_parse(source_bytes)
+    root = tree.root_node
     positions: list[tuple[int, int]] = []
-    _skip = {
-        tokenize.NL,
-        tokenize.NEWLINE,
-        tokenize.COMMENT,
-        tokenize.INDENT,
-        tokenize.DEDENT,
-        tokenize.ENCODING,
-    }
-    try:
-        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
-    except tokenize.TokenError:
-        return positions
 
-    paren_depth = 0
-    in_class_def = False  # True between 'class' keyword and its ':' at depth 0
+    def visit(node):
+        if node.type == "call":
+            func_node = node.child_by_field_name("function")
+            if func_node is not None:
+                if func_node.type == "attribute":
+                    attr_node = func_node.child_by_field_name("attribute")
+                    if attr_node is not None:
+                        pos_node = attr_node
+                    else:
+                        pos_node = func_node
+                else:
+                    pos_node = func_node
+                line = pos_node.start_point[0] + 1
+                col = pos_node.start_point[1]
+                if start_line <= line <= end_line:
+                    positions.append((line, col))
+        for child in node.children:
+            visit(child)
 
-    for i, tok in enumerate(tokens):
-        if tok.string == "(":
-            paren_depth += 1
-        elif tok.string == ")":
-            paren_depth -= 1
-
-        if tok.type != tokenize.NAME:
-            continue
-        tok_line = tok.start[0]
-        if not (start_line <= tok_line <= end_line):
-            continue
-        if func_name is not None and tok.string == func_name and tok_line == start_line:
-            continue
-        # Skip decorators: if the previous token is '@', this is a decorator
-        # application, not a call.
-        if i > 0 and tokens[i - 1].string == "@":
-            continue
-        # Track class definition context: from 'class' keyword to ':' at
-        # paren depth 0.  Names inside this region (class name + bases) are
-        # not function calls.
-        if tok.string == "class":
-            in_class_def = True
-            continue
-        if in_class_def and tok.string == ":" and paren_depth == 0:
-            in_class_def = False
-            continue
-        if in_class_def:
-            continue
-        j = i + 1
-        while j < len(tokens) and tokens[j].type in _skip:
-            j += 1
-        if j < len(tokens) and tokens[j].string == "(":
-            positions.append((tok.start[0], tok.start[1]))
-
+    visit(root)
     return positions
 
 
-def _name_col_on_line(
-    line_text: str, name: str, occurrence: int = 0
-) -> Optional[int]:
+def _name_col_on_line(line_text: str, name: str, occurrence: int = 0) -> Optional[int]:
     """Column of the *occurrence*-th (0-based) whole-word match of *name*.
 
     By default returns the first occurrence.  Pass *occurrence* > 0 to
@@ -247,6 +192,61 @@ def _name_col_on_line(
             return m.start()
         idx += 1
     return None
+
+
+def _ts_find_identifier_in_scope(
+    source_bytes: bytes, line: int, name: str
+) -> Optional[tuple[int, int]]:
+    """Find the closest ``identifier`` node matching *name* within the scope
+    containing *line* (1-based).
+
+    Returns (line_1based, col_0based) or ``None``.  Uses tree-sitter to walk
+    the AST of the innermost function (or class) containing *line*, so only
+    actual identifier nodes are matched — not strings, comments, or keywords.
+    The closest match to *line* wins.
+    """
+    tree = _ts_parse(source_bytes)
+    root = tree.root_node
+
+    # Find the tightest function or class containing *line*.
+    best_scope = None
+    best_scope_size = None
+
+    def find_scope(node):
+        nonlocal best_scope, best_scope_size
+        if node.type in ("function_definition", "class_definition"):
+            start = node.start_point[0] + 1
+            end = node.end_point[0] + 1
+            if start <= line <= end:
+                size = end - start
+                if best_scope is None or size < best_scope_size:
+                    best_scope = node
+                    best_scope_size = size
+        for child in node.children:
+            find_scope(child)
+
+    find_scope(root)
+    if best_scope is None:
+        return None
+
+    # Find the closest identifier node matching *name* within that scope.
+    best: Optional[tuple[int, int]] = None
+    best_dist = float("inf")
+
+    def find_ident(node):
+        nonlocal best, best_dist
+        if node.type == "identifier" and node.text == name.encode("utf-8"):
+            n_line = node.start_point[0] + 1
+            n_col = node.start_point[1]
+            dist = abs(n_line - line)
+            if dist < best_dist:
+                best = (n_line, n_col)
+                best_dist = dist
+        for child in node.children:
+            find_ident(child)
+
+    find_ident(best_scope)
+    return best
 
 
 def _uri_to_path(uri: str) -> str:
@@ -272,6 +272,106 @@ def _is_stdlib_path(path: str) -> bool:
     return any(marker in path for marker in _STDLIB_MARKERS)
 
 
+def _ts_is_stub_function(source_bytes: bytes, line: int) -> bool:
+    """Return True if the function starting on *line* (1-based) is a stub.
+
+    A stub is a function whose body contains only a docstring and one of:
+    - ``raise NotImplementedError``
+    - ``pass``
+    - ``...``
+
+    Uses tree-sitter to inspect the AST, not string matching.
+    """
+    tree = _ts_parse(source_bytes)
+    root = tree.root_node
+
+    def find_fn(node):
+        if node.type == "function_definition":
+            start = node.start_point[0] + 1
+            if start == line:
+                return node
+        for child in node.children:
+            found = find_fn(child)
+            if found is not None:
+                return found
+        return None
+
+    fn = find_fn(root)
+    if fn is None:
+        return False
+
+    body = fn.child_by_field_name("body")
+    if body is None:
+        return False
+
+    for child in body.children:
+        if child.type == "expression_statement":
+            # Docstring (string) is allowed in stubs.
+            if any(s.type == "string" for s in child.children):
+                continue
+            # Ellipsis (``...``) is a stub body.
+            if any(s.type == "ellipsis" for s in child.children):
+                return True
+            # Any other expression is concrete.
+            return False
+        elif child.type == "pass_statement":
+            return True
+        elif child.type == "raise_statement":
+            # ``raise NotImplementedError`` — check the raised name.
+            text = child.text.decode("utf-8", errors="replace")
+            if "NotImplementedError" in text:
+                return True
+            return False
+        else:
+            # Any other statement (return, assignment, etc.) is concrete.
+            return False
+
+    return False
+
+
+def _dedup_callees(results: list[dict]) -> list[dict]:
+    """Deduplicate callee results by name, keeping the most specific implementation.
+
+    When the same method appears via both its abstract declaration (a stub
+    that raises ``NotImplementedError`` or uses ``pass``/``...``) and its
+    concrete implementation, keep the concrete one.  Callees with empty
+    names are kept as-is.
+    """
+    deduped: list[dict] = []
+    by_name: dict[str, dict] = {}
+    for r in results:
+        rname = r.get("name", "")
+        if not rname:
+            deduped.append(r)
+            continue
+        existing = by_name.get(rname)
+        if existing is None:
+            by_name[rname] = r
+            deduped.append(r)
+        elif _callee_is_stub(existing) and not _callee_is_stub(r):
+            # Replace the abstract entry with the concrete one.
+            deduped[deduped.index(existing)] = r
+            by_name[rname] = r
+    return deduped
+
+
+def _callee_is_stub(callee: dict) -> bool:
+    """Whether a callee result points to a stub/abstract method.
+
+    Uses tree-sitter to inspect the function body at the callee's location.
+    """
+    file = callee.get("file", "")
+    line = callee.get("line", 0)
+    if not file or not line:
+        return False
+    try:
+        with open(file, encoding="utf-8", errors="replace") as f:
+            source = f.read()
+    except OSError:
+        return False
+    return _ts_is_stub_function(source.encode("utf-8", errors="replace"), line)
+
+
 def _lsp_symbol_kind_to_str(kind_num: int) -> str:
     """Map an LSP SymbolKind number to a human-readable kind string."""
     return _LSP_SYMBOL_KINDS.get(kind_num, "unknown")
@@ -294,17 +394,19 @@ def _parse_hover(hover: object) -> tuple[str, str]:
         value = contents
     elif isinstance(contents, list):
         # MarkedString list — join all string entries.
-        parts = []
+        parts: list[str] = []
         for entry in contents:
             if isinstance(entry, str):
                 parts.append(entry)
             elif isinstance(entry, dict):
-                parts.append(entry.get("value", ""))
+                val = entry.get("value", "")
+                if isinstance(val, str):
+                    parts.append(val)
         value = "\n".join(p for p in parts if p)
     if not value:
         return "", ""
     # Strip markdown code fences if present.
-    lines = value.strip().splitlines()
+    lines = str(value).strip().splitlines()
     if lines and lines[0].strip().startswith("```"):
         lines = lines[1:]
         if lines and lines[-1].strip() == "```":
@@ -328,12 +430,14 @@ class PythonTracer(Tracer):
         super().__init__(root, backend, cache)
         self._lsp: Optional[TyLspClient] = None
         self._lsp_lock = threading.Lock()
+        # Serializes all LSP requests (did_open + references/definition/hover).
+        # The ty server is single-threaded; concurrent requests from parallel
+        # tool calls cause "content modified" errors and timeouts.  RLock so
+        # _resolve can call find_symbol while already holding the lock.
+        self._lsp_request_lock = threading.RLock()
         self._ms: Optional[MicrosandboxBackend] = None
         # LSP document lifecycle: track which URIs are already open.
         self._open_docs: set[str] = set()
-        self._open_docs_lock = threading.Lock()
-        # In-memory tree-sitter parse cache (single-entry, mtime-keyed).
-        self._tree_cache = _TreeCache()
 
     @property
     def ms(self) -> MicrosandboxBackend:
@@ -354,53 +458,22 @@ class PythonTracer(Tracer):
 
         LSP ``textDocument/didOpen`` is meant to be called once per document.
         Repeated calls for the same URI are skipped to avoid server errors.
+        Always called within ``_lsp_request_lock`` so no separate lock needed.
         """
-        with self._open_docs_lock:
-            if uri in self._open_docs:
-                return
-            self._open_docs.add(uri)
+        if uri in self._open_docs:
+            return
+        self._open_docs.add(uri)
         lsp.did_open(uri, source)
 
-    def _did_close(self, lsp: TyLspClient, uri: str) -> None:
-        """Close *uri* in the LSP server if currently open."""
-        with self._open_docs_lock:
-            if uri not in self._open_docs:
-                return
-            self._open_docs.discard(uri)
-        try:
-            lsp.notify(
-                "textDocument/didClose",
-                {"textDocument": {"uri": uri}},
-            )
-        except Exception:
-            logger.warning("did_close failed for %s", uri, exc_info=True)
-
-    # ------------------------------------------------------------------ #
-    # In-memory tree-sitter parse cache
-    # ------------------------------------------------------------------ #
-
-    def _cached_parse(self, file: str, source: str):
-        """Parse *source* with tree-sitter, using an in-memory cache.
-
-        The cache is keyed by (file, mtime) and stores a single entry —
-        enough to avoid redundant re-parses when multiple methods read the
-        same file within one tool invocation.
-        """
-        import os
-
-        try:
-            mtime = os.path.getmtime(file)
-        except OSError:
-            mtime = 0.0
-        cached = self._tree_cache.get(file, mtime)
-        if cached is not None:
-            return cached
-        tree = _ts_parse(source.encode("utf-8", errors="replace"))
-        self._tree_cache.set(file, mtime, tree)
-        return tree
-
     def _get_lsp(self) -> TyLspClient:
-        """Get or lazily create the ty LSP client (thread-safe)."""
+        """Get or lazily create the ty LSP client (thread-safe).
+
+        The venv (``venv_bin`` / ``venv_env``) is established by the backend
+        during sandbox boot via :class:`~metalgate_code.factory.venv_manager.VenvManager`.
+        The tracer consumes it directly — it never manipulates or discovers
+        the venv itself.  ``python_path`` is derived from ``venv_bin`` when
+        available.
+        """
         if self._lsp is not None:
             return self._lsp
 
@@ -411,26 +484,20 @@ class PythonTracer(Tracer):
             sb = self.ms._ensure_sandbox_sync()
             guest_root = self.ms._to_guest_path(str(self.root))
             root_uri = _path_to_uri(guest_root)
-            python_path = self._detect_python()
 
-            self._lsp = TyLspClient(sb, root_uri, python_path=python_path)
+            venv_bin = self.ms.venv_bin
+            venv_env = self.ms.venv_env
+            python_path = f"{venv_bin}/python" if venv_bin else None
+
+            self._lsp = TyLspClient(
+                sb,
+                root_uri,
+                python_path=python_path,
+                venv_bin=venv_bin,
+                venv_env=venv_env,
+            )
             self._lsp.start()
             return self._lsp
-
-    def _detect_python(self) -> Optional[str]:
-        """Detect the Python interpreter path inside the sandbox."""
-        if self.backend is None:
-            return None
-        try:
-            result = self.backend.execute("uv run which python")
-            if result.exit_code is not None and result.exit_code == 0:
-                return result.output.strip()
-            result = self.backend.execute("which python")
-            if result.exit_code is not None and result.exit_code == 0:
-                return result.output.strip()
-        except Exception:
-            logger.warning("Failed to detect Python interpreter", exc_info=True)
-        return None
 
     # ------------------------------------------------------------------ #
     # Tracer interface
@@ -537,11 +604,12 @@ class PythonTracer(Tracer):
                 return None
 
         cached = self.cache.get_definition(file, line, name)
-        if cached is not _CACHE_MISS:
+        if cached is not _CACHE_MISS and cached is not None:
             return cached
 
         result = self._resolve(file, line, name)
-        self.cache.set_definition(file, line, name, result)
+        if result is not None:
+            self.cache.set_definition(file, line, name, result)
         return result
 
     def get_source(self, file: str, line: int, context: int = 60) -> dict:
@@ -562,6 +630,7 @@ class PythonTracer(Tracer):
 
             if scope:
                 start, end = scope
+                fallback = False
             else:
                 logger.warning(
                     "get_source: no scope found at %s:%d, falling back to "
@@ -573,6 +642,7 @@ class PythonTracer(Tracer):
                 centre = line - 1
                 start = max(0, centre - context // 2)
                 end = min(len(all_lines), centre + (context + 1) // 2)
+                fallback = True
 
             snippet = all_lines[start:end]
             return {
@@ -580,6 +650,7 @@ class PythonTracer(Tracer):
                 "start_line": start + 1,
                 "end_line": end,
                 "source": "\n".join(snippet),
+                "fallback": fallback,
             }
         except OSError as exc:
             return {
@@ -587,6 +658,7 @@ class PythonTracer(Tracer):
                 "start_line": 0,
                 "end_line": 0,
                 "source": "",
+                "fallback": True,
                 "error": str(exc),
             }
 
@@ -610,13 +682,29 @@ class PythonTracer(Tracer):
         lsp = self._get_lsp()
         guest_file = self.ms._resolve_guest_path(file)
         uri = _path_to_uri(guest_file)
-        self._did_open(lsp, uri, source)
 
-        try:
-            refs = lsp.references(uri, line - 1, col, include_declaration=False)
-        except Exception:
-            logger.warning("LSP references failed for %s:%d", file, line, exc_info=True)
-            return []
+        with self._lsp_request_lock:
+            self._did_open(lsp, uri, source)
+
+            try:
+                refs = lsp.references(uri, line - 1, col, include_declaration=False)
+            except Exception:
+                logger.warning(
+                    "LSP references failed for %s:%d", file, line, exc_info=True
+                )
+                return [
+                    {
+                        "file": file,
+                        "line": line,
+                        "name": sym_name or "",
+                        "caller": "",
+                        "context": "",
+                        "note": (
+                            "LSP references request failed. The symbol may still "
+                            "be referenced — try again."
+                        ),
+                    }
+                ]
 
         results: list[dict] = []
         seen: set[tuple[str, int]] = set()
@@ -651,7 +739,9 @@ class PythonTracer(Tracer):
                 if best:
                     caller_name = best["name"]
             except Exception:
-                logger.warning("get_file_outline failed for %s", ref_file, exc_info=True)
+                logger.warning(
+                    "get_file_outline failed for %s", ref_file, exc_info=True
+                )
 
             # Read the referencing line for context
             context_text = ""
@@ -675,6 +765,22 @@ class PythonTracer(Tracer):
             if len(results) >= _MAX_CALLERS:
                 break
 
+        if not results:
+            return [
+                {
+                    "file": file,
+                    "line": line,
+                    "name": sym_name or "",
+                    "caller": "",
+                    "context": "",
+                    "note": (
+                        "No static callers found. This symbol may be called "
+                        "via dynamic dispatch, framework callbacks, or from "
+                        "site-packages not indexed by the language server."
+                    ),
+                }
+            ]
+
         return results
 
     def get_callees(self, file: str, line: int) -> list[dict]:
@@ -691,95 +797,104 @@ class PythonTracer(Tracer):
             return []
 
         start_line, end_line, func_name = func_info
-        positions = _call_positions(source, start_line, end_line, func_name=func_name)
+        positions = _ts_call_positions(
+            source.encode("utf-8", errors="replace"), start_line, end_line
+        )
 
         lsp = self._get_lsp()
         guest_file = self.ms._resolve_guest_path(file)
         uri = _path_to_uri(guest_file)
-        self._did_open(lsp, uri, source)
         results: list[dict] = []
         seen: set[tuple] = set()
 
-        for call_line, call_col in positions:
-            try:
-                defs = lsp.definition(uri, call_line - 1, call_col)
-            except Exception:
-                logger.warning(
-                    "LSP definition failed at %s:%d:%d",
-                    file, call_line, call_col, exc_info=True,
-                )
-                continue
+        with self._lsp_request_lock:
+            self._did_open(lsp, uri, source)
 
-            if not defs:
-                continue
-
-            if isinstance(defs, dict):
-                defs = [defs]
-
-            for d in defs:
-                d_uri = d.get("uri", "")
-                if not d_uri:
-                    continue
-                d_file = self.ms._to_host_path(_uri_to_path(d_uri))
-
-                # Skip stdlib/builtins — they add noise without aiding
-                # codebase understanding.
-                if _is_stdlib_path(d_file):
-                    continue
-
-                d_range = d.get("range", {})
-                d_line = d_range.get("start", {}).get("line", 0) + 1
-
-                key = (d_file, d_line)
-                if key in seen:
-                    continue
-                seen.add(key)
-
-                # Look up name/kind from the definition file's outline
-                d_name = ""
-                d_kind = ""
-                d_sig = ""
+            for call_line, call_col in positions:
                 try:
-                    outline = self.get_file_outline(d_file)
-                    for sym in outline:
-                        if sym["line"] == d_line:
-                            d_name = sym["name"]
-                            d_kind = sym["kind"]
-                            d_sig = sym.get("signature", "")
-                            break
+                    defs = lsp.definition(uri, call_line - 1, call_col)
                 except Exception:
                     logger.warning(
-                        "get_file_outline failed for %s", d_file, exc_info=True
+                        "LSP definition failed at %s:%d:%d",
+                        file,
+                        call_line,
+                        call_col,
+                        exc_info=True,
+                    )
+                    continue
+
+                if not defs:
+                    continue
+
+                if isinstance(defs, dict):
+                    defs = [defs]
+
+                for d in defs:
+                    d_uri = d.get("uri", "")
+                    if not d_uri:
+                        continue
+                    d_file = self.ms._to_host_path(_uri_to_path(d_uri))
+
+                    # Skip stdlib/builtins — they add noise without aiding
+                    # codebase understanding.
+                    if _is_stdlib_path(d_file):
+                        continue
+
+                    d_range = d.get("range", {})
+                    d_line = d_range.get("start", {}).get("line", 0) + 1
+
+                    key = (d_file, d_line)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    # Look up name/kind from the definition file's outline
+                    d_name = ""
+                    d_kind = ""
+                    d_sig = ""
+                    try:
+                        outline = self.get_file_outline(d_file)
+                        for sym in outline:
+                            if sym["line"] == d_line:
+                                d_name = sym["name"]
+                                d_kind = sym["kind"]
+                                d_sig = sym.get("signature", "")
+                                break
+                    except Exception:
+                        logger.warning(
+                            "get_file_outline failed for %s", d_file, exc_info=True
+                        )
+
+                    results.append(
+                        {
+                            "name": d_name,
+                            "kind": d_kind,
+                            "file": d_file,
+                            "line": d_line,
+                            "signature": d_sig,
+                        }
                     )
 
-                results.append(
-                    {
-                        "name": d_name,
-                        "kind": d_kind,
-                        "file": d_file,
-                        "line": d_line,
-                        "signature": d_sig,
-                    }
-                )
-
-        return results
+        # Deduplicate by name: when the same method appears via both its
+        # abstract declaration and concrete implementation, keep the
+        # concrete one (detected via AST-based stub inspection).
+        return _dedup_callees(results)
 
     def find_symbol(self, name: str) -> list[dict]:
-        """Search for *name* across the project and installed packages.
+        """Search for *name* across the project via LSP ``workspace/symbol``.
 
-        Uses the LSP ``workspace/symbol`` request for project-scoped results.
-        If that returns nothing (ty only indexes the workspace root, not
-        PYTHONPATH/site-packages), falls back to scanning project import
-        statements and resolving each via LSP ``definition`` to find the
-        symbol in third-party packages.
+        ty's ``workspace/symbol`` indexes first-party project files only —
+        it does not search site-packages (confirmed from ty 0.0.55 source).
+        For third-party symbols, use ``goto_definition`` from a usage site,
+        which ty resolves directly to the site-packages definition.
         """
         results: list[dict] = []
         seen: set[tuple] = set()
 
-        # 1. Try workspace/symbol — fast, covers project files.
         try:
             lsp = self._get_lsp()
-            symbols = lsp.workspace_symbol(name)
+            with self._lsp_request_lock:
+                symbols = lsp.workspace_symbol(name)
             for sym in symbols:
                 location = sym.get("location", {})
                 sym_uri = location.get("uri", "")
@@ -807,113 +922,20 @@ class PythonTracer(Tracer):
         except Exception:
             logger.warning("workspace/symbol failed for %r", name, exc_info=True)
 
-        if results:
-            return results
-
-        # 2. Fall back: scan project files for import statements that
-        #    reference *name*, then resolve via LSP definition to find
-        #    the symbol's definition in third-party packages.
-        return self._find_symbol_via_imports(name)
-
-    def _find_symbol_via_imports(self, name: str) -> list[dict]:
-        """Find *name* in third-party packages by scanning project imports.
-
-        Reads each project .py file, looks for ``import name`` or
-        ``from ... import name`` statements, then uses LSP ``definition``
-        to resolve the symbol to its actual definition location.
-        """
-        try:
-            lsp = self._get_lsp()
-        except Exception:
-            logger.warning("LSP unavailable for find_symbol_via_imports", exc_info=True)
-            return []
-
-        results: list[dict] = []
-        seen: set[tuple] = set()
-        # Word-boundary pattern to avoid substring false positives.
-        name_re = re.compile(rf"\b{re.escape(name)}\b")
-
-        # Scan project .py files for import lines mentioning *name*
-        for py_file in self.root.rglob("*.py"):
-            if _PYCACHE in py_file.parts or _VENV_DIR in py_file.parts:
-                continue
-            try:
-                source = self._read_file(str(py_file))
-            except OSError:
-                continue
-
-            for i, line in enumerate(source.splitlines(), 1):
-                stripped = line.strip()
-                # Match: from X import name  /  import name
-                # Use word-boundary regex to avoid substring false positives.
-                if not (
-                    (stripped.startswith("from ") and name_re.search(stripped))
-                    or (stripped.startswith("import ") and name_re.search(stripped))
-                ):
-                    continue
-
-                # Resolve via LSP definition
-                col = _name_col_on_line(line, name)
-                if col is None:
-                    continue
-                try:
-                    guest_file = self.ms._to_guest_path(str(py_file))
-                    uri = _path_to_uri(guest_file)
-                    self._did_open(lsp, uri, source)
-                    defs = lsp.definition(uri, i - 1, col)
-                except Exception:
-                    logger.warning(
-                        "LSP definition failed for import at %s:%d",
-                        py_file, i, exc_info=True,
-                    )
-                    continue
-                if not defs:
-                    continue
-                if isinstance(defs, dict):
-                    defs = [defs]
-
-                for d in defs:
-                    d_uri = d.get("uri", "")
-                    if not d_uri:
-                        continue
-                    d_file = self.ms._to_host_path(_uri_to_path(d_uri))
-                    d_line = d.get("range", {}).get("start", {}).get("line", 0) + 1
-
-                    key = (d_file, d_line)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-
-                    # Skip if it just points back to the same import line
-                    # (path may be host-absolute or project-relative)
-                    if d_line == i and (
-                        str(py_file) == d_file or d_file.endswith(str(py_file))
-                    ):
-                        continue
-
-                    # Get kind from outline
-                    d_kind = ""
-                    try:
-                        outline = self.get_file_outline(d_file)
-                        for sym in outline:
-                            if sym["line"] == d_line:
-                                d_kind = sym["kind"]
-                                break
-                    except Exception:
-                        logger.warning(
-                            "get_file_outline failed for %s", d_file, exc_info=True
-                        )
-
-                    results.append(
-                        {
-                            "name": name,
-                            "kind": d_kind,
-                            "file": d_file,
-                            "line": d_line,
-                        }
-                    )
-                    if len(results) >= _MAX_CALLERS:
-                        return results
+        if not results:
+            return [
+                {
+                    "name": name,
+                    "kind": "",
+                    "file": "",
+                    "line": 0,
+                    "note": (
+                        "No project symbols found. This symbol may exist only "
+                        "in installed packages — use goto_definition from a "
+                        "usage site to resolve it."
+                    ),
+                }
+            ]
 
         return results
 
@@ -924,56 +946,70 @@ class PythonTracer(Tracer):
     def _resolve(self, file: str, line: int, name: str) -> Optional[dict]:
         """Resolve *name* at *line* in *file* to its definition via LSP.
 
-        If ty resolves to an import statement in the same file (e.g.
-        ``from bar import Bar`` instead of the actual class definition),
-        delegates to :meth:`find_symbol` which resolves imports to their
-        third-party definitions.
+        ty resolves usage sites directly to the actual definition —
+        first-party or site-packages.  When ty can't resolve (e.g.
+        conditional imports, type annotations in signatures), falls
+        back to ``workspace/symbol`` search by name.
         """
         try:
             source = self._read_file(file)
             lines = source.splitlines()
             if line < 1 or line > len(lines):
                 return None
-            col = _name_col_on_line(lines[line - 1], name)
-            if col is None:
-                return None
 
             lsp = self._get_lsp()
             guest_file = self.ms._resolve_guest_path(file)
             uri = _path_to_uri(guest_file)
-            self._did_open(lsp, uri, source)
 
-            d_file, d_line, d_col, d_uri = self._lsp_definition(
-                lsp, uri, line - 1, col
-            )
-            if d_uri is None:
-                return None
+            # Try to resolve at the given line first.
+            col = _name_col_on_line(lines[line - 1], name)
 
-            # If ty resolved to an import line in the same file, delegate
-            # to find_symbol which resolves imports to third-party defs.
-            if d_file and d_file.endswith(file) and 1 <= d_line <= len(lines):
-                import_line = lines[d_line - 1].strip()
-                if import_line.startswith(("import ", "from ")):
-                    sym_results = self.find_symbol(name)
-                    for sr in sym_results:
-                        sr_file = sr.get("file", "")
-                        if sr_file and not sr_file.endswith(file):
-                            d_file = sr_file
-                            d_line = sr.get("line", 0)
+            # If the name isn't on the given line, find it in the enclosing
+            # scope via tree-sitter so we can give the LSP the right position.
+            if col is None:
+                found = _ts_find_identifier_in_scope(
+                    source.encode("utf-8", errors="replace"), line, name
+                )
+                if found is not None:
+                    line, col = found
+
+            with self._lsp_request_lock:
+                self._did_open(lsp, uri, source)
+
+                if col is not None:
+                    d_file, d_line, d_col, d_uri = self._lsp_definition(
+                        lsp, uri, line - 1, col
+                    )
+                else:
+                    d_file, d_line, d_col, d_uri = None, 0, 0, None
+
+                if d_uri is None:
+                    # LSP couldn't resolve (e.g. name not on the given line,
+                    # conditional import, type annotation).  Fall back to
+                    # workspace symbol search by name.
+                    if name:
+                        sym_results = self.find_symbol(name)
+                        if sym_results and sym_results[0].get("file"):
+                            sr = sym_results[0]
+                            d_file = sr["file"]
+                            d_line = sr["line"]
                             d_col = 0
-                            d_uri = _path_to_uri(
-                                self.ms._resolve_guest_path(sr_file)
-                            )
-                            break
+                            d_uri = _path_to_uri(self.ms._resolve_guest_path(d_file))
+                    if d_uri is None:
+                        return None
 
-            # Get hover info for signature/docstring
-            signature = ""
-            docstring = ""
-            try:
-                hover = lsp.hover(uri, line - 1, col)
-                signature, docstring = _parse_hover(hover)
-            except Exception:
-                logger.warning("hover failed for %s:%d", file, line, exc_info=True)
+                # Get hover info for signature/docstring (only when we
+                # have a valid position in the source file).
+                signature = ""
+                docstring = ""
+                if col is not None:
+                    try:
+                        hover = lsp.hover(uri, line - 1, col)
+                        signature, docstring = _parse_hover(hover)
+                    except Exception:
+                        logger.warning(
+                            "hover failed for %s:%d", file, line, exc_info=True
+                        )
 
             # Determine kind from the definition file's outline
             kind = "unknown"
@@ -1039,7 +1075,9 @@ class PythonTracer(Tracer):
             for m in re.finditer(r"\b[a-zA-Z_]\w*\b", text):
                 return m.group()
         except OSError:
-            logger.warning("Failed to read %s for _first_name_on_line", file, exc_info=True)
+            logger.warning(
+                "Failed to read %s for _first_name_on_line", file, exc_info=True
+            )
         return None
 
     def _def_name_col(self, file: str, line: int) -> Optional[int]:
@@ -1052,9 +1090,7 @@ class PythonTracer(Tracer):
             logger.warning("Failed to read %s for _def_name_col", file, exc_info=True)
             return None
 
-    def _def_name_col_from_lines(
-        self, lines: list[str], line: int
-    ) -> Optional[int]:
+    def _def_name_col_from_lines(self, lines: list[str], line: int) -> Optional[int]:
         """Column of the name token on a def/class line, from pre-read lines."""
         if line < 1 or line > len(lines):
             return None
@@ -1076,9 +1112,7 @@ class PythonTracer(Tracer):
             logger.warning("Failed to read %s for _def_name", file, exc_info=True)
             return None
 
-    def _def_name_from_lines(
-        self, lines: list[str], line: int
-    ) -> Optional[str]:
+    def _def_name_from_lines(self, lines: list[str], line: int) -> Optional[str]:
         """Extract the symbol name from a def/class line, from pre-read lines."""
         if line < 1 or line > len(lines):
             return None

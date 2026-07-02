@@ -100,7 +100,9 @@ def _build_agent(
                 result = shell_backend.read(str(agents_md_path))
                 if result.error:
                     raise OSError(f"Cannot read {agents_md_path}: {result.error}")
-                agents_md_content = result.file_data["content"]
+                agents_md_content = (
+                    result.file_data["content"] if result.file_data else ""
+                )
             else:
                 with open(agents_md_path, "r", encoding="utf-8") as f:
                     agents_md_content = f.read()

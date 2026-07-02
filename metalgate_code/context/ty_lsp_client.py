@@ -54,7 +54,12 @@ class _BackgroundLoop:
         self._loop.run_forever()
 
     def run(self, coro, *, timeout: float = 300) -> Any:
-        """Submit *coro* to the background loop and wait for the result."""
+        """Submit *coro* to the background loop and wait for the result.
+
+        If the background loop has died (thread crashed), restarts it
+        transparently so a single failure doesn't permanently break the
+        client.
+        """
         if self._loop is None or not self._loop.is_running():
             self.start()
         assert self._loop is not None
@@ -84,11 +89,18 @@ class TyLspClient:
         root_uri: str,
         *,
         python_path: Optional[str] = None,
+        venv_bin: Optional[str] = None,
+        venv_env: Optional[dict[str, str]] = None,
     ) -> None:
         self._sandbox = sandbox
         self._root_uri = root_uri
         self._root_path = root_uri.replace("file://", "")
         self._python_path = python_path
+        # Guest-compatible venv established by VenvManager.  When set, all
+        # shell commands run with venv_env activated, and ty is launched
+        # from venv_bin so it uses the same venv as the project.
+        self._venv_bin = venv_bin
+        self._venv_env = venv_env
         self._handle = None
         self._stdin = None
         self._lock = asyncio.Lock()
@@ -105,12 +117,14 @@ class TyLspClient:
 
     def start(self) -> None:
         """Boot the ty server process and complete the LSP initialize handshake."""
-        self._bg.run(self._start(), timeout=_SERVER_BOOT_TIMEOUT_SEC + _TY_INSTALL_TIMEOUT_SEC + 30)
+        self._bg.run(
+            self._start(),
+            timeout=_SERVER_BOOT_TIMEOUT_SEC + _TY_INSTALL_TIMEOUT_SEC + 30,
+        )
 
     async def _start(self) -> None:
         if self._started:
             return
-        self._started = True
 
         await self._ensure_ty_installed()
 
@@ -124,8 +138,26 @@ class TyLspClient:
         if site_paths:
             env["PYTHONPATH"] = ":".join(site_paths)
 
+        # Launch ty from the venv's bin directory when available, so it
+        # uses the same venv as the project (ty is installed there by
+        # _ensure_ty_installed).  Otherwise fall back to PATH lookup.
+        if self._venv_bin:
+            ty_bin = f"{self._venv_bin}/ty"
+            try:
+                exists = await asyncio.wait_for(
+                    self._sandbox.fs.exists(ty_bin), timeout=10
+                )
+            except Exception:
+                exists = False
+            if exists:
+                ty_cmd = ty_bin
+            else:
+                ty_cmd = "ty"
+        else:
+            ty_cmd = "ty"
+
         self._handle = await self._sandbox.exec_stream(
-            "ty",
+            ty_cmd,
             ["server"],
             stdin=Stdin.pipe(),
             env=env or None,
@@ -146,13 +178,18 @@ class TyLspClient:
                 "pythonPath": self._python_path,
             }
 
-        await self._request(
+        # Use _send_request / _send_notify (lock-free) instead of
+        # _request / _notify (which acquire self._lock).  _start() may
+        # be called from within _request() which already holds the lock,
+        # so using the lock-acquiring variants would deadlock.
+        await self._send_request(
             "initialize",
             init_params,
             timeout=_SERVER_BOOT_TIMEOUT_SEC,
         )
-        await self._notify("initialized", {})
+        await self._send_notify("initialized", {})
 
+        self._started = True
         logger.info("ty server started (root_uri=%s)", self._root_uri)
 
     def stop(self) -> None:
@@ -191,10 +228,35 @@ class TyLspClient:
     async def _find_site_packages(self) -> list[str]:
         """Discover site-packages directories inside the sandbox.
 
-        Returns paths to both the main site-packages and any ``.venv``
-        site-packages so ty can resolve third-party imports.
+        Returns paths to the venv's site-packages so ty can resolve
+        third-party imports.
+
+        Uses the venv's Python (from VenvManager) when available, avoiding
+        ``uv run`` which would create a second venv.  Falls back to system
+        Python discovery only when no venv was established.
         """
         paths: list[str] = []
+
+        # Prefer the venv's Python — no uv run, no second venv.
+        if self._venv_bin:
+            py = f"{self._venv_bin}/python"
+            try:
+                result = await self._sandbox.shell(
+                    f"{py} -c 'import site; print(\"\\n\".join(site.getsitepackages()))'",
+                    env=self._venv_env,
+                )
+                if result.exit_code == 0 and result.stdout_text.strip():
+                    paths = [
+                        p.strip()
+                        for p in result.stdout_text.strip().splitlines()
+                        if p.strip()
+                    ]
+            except Exception:
+                pass
+            if paths:
+                return paths
+
+        # Fallback: system Python (no venv established).
         for cmd in (
             "uv run python -c 'import site; print(\"\\n\".join(site.getsitepackages()))'",
             "python -c 'import site; print(\"\\n\".join(site.getsitepackages()))'",
@@ -243,15 +305,44 @@ class TyLspClient:
         to discover first-party modules.  If none exists, we create a minimal
         one with ``environment.extra-paths`` set to the workspace root so that
         relative imports resolve correctly.
+
+        When a venv is established (``venv_bin``), ty is installed into that
+        venv so the ``ty`` binary lands in ``venv_bin`` and uses the venv's
+        Python.  Otherwise it falls back to system pip.
         """
-        result = await self._sandbox.shell("which ty 2>/dev/null")
+        # Check if ty is already available (in the venv or on PATH).
+        ty_check_cmd = (
+            f"{self._venv_bin}/ty --version 2>/dev/null"
+            if self._venv_bin
+            else "which ty 2>/dev/null"
+        )
+        result = await self._sandbox.shell(ty_check_cmd, env=self._venv_env)
         if result.exit_code != 0 or not result.stdout_text.strip():
             logger.info("Installing ty inside sandbox…")
-            result = await self._sandbox.shell(
-                "pip install ty -q 2>&1", timeout=_TY_INSTALL_TIMEOUT_SEC
-            )
+            if self._venv_bin:
+                # Install into the venv so the ty binary lands in venv_bin.
+                # uv-created venvs lack pip, so try pip first then uv pip.
+                py = f"{self._venv_bin}/python"
+                result = await self._sandbox.shell(
+                    f"{py} -m pip install ty -q 2>&1",
+                    env=self._venv_env,
+                    timeout=_TY_INSTALL_TIMEOUT_SEC,
+                )
+                if result.exit_code != 0:
+                    logger.info("pip not available in venv, trying uv pip install…")
+                    result = await self._sandbox.shell(
+                        f"uv pip install ty --python {py} -q 2>&1",
+                        env=self._venv_env,
+                        timeout=_TY_INSTALL_TIMEOUT_SEC,
+                    )
+            else:
+                result = await self._sandbox.shell(
+                    "pip install ty -q 2>&1", timeout=_TY_INSTALL_TIMEOUT_SEC
+                )
             if result.exit_code != 0:
-                raise RuntimeError(f"Failed to install ty in sandbox: {result.stdout_text}")
+                raise RuntimeError(
+                    f"Failed to install ty in sandbox: {result.stdout_text}"
+                )
 
         # Ensure pyproject.toml exists for module discovery.
         # Site-packages paths are passed via LSP initializationOptions
@@ -266,11 +357,7 @@ class TyLspClient:
             exists = False
 
         if not exists:
-            content = (
-                '[project]\n'
-                'name = "project"\n'
-                'version = "0.0.0"\n'
-            )
+            content = '[project]\nname = "project"\nversion = "0.0.0"\n'
             try:
                 await asyncio.wait_for(
                     self._sandbox.fs.write(pyproject, content.encode("utf-8")),
@@ -319,11 +406,29 @@ class TyLspClient:
             self._stdout_buf.extend(data)
             self._process_buffer()
 
-        # Wake up any pending futures
+        # Server crashed or stream closed — clean up state so _request
+        # can auto-restart on the next call.
+        self._started = False
+
+        # Wake up any pending futures with an error so they don't hang.
         for fut in self._pending.values():
             if not fut.done():
                 fut.set_exception(RuntimeError("ty server closed"))
         self._pending.clear()
+
+        # Close stdin and kill the handle so resources are released.
+        if self._stdin is not None:
+            try:
+                await self._stdin.close()
+            except Exception:
+                pass
+            self._stdin = None
+        if self._handle is not None:
+            try:
+                await self._handle.kill()
+            except Exception:
+                pass
+            self._handle = None
 
     def _process_buffer(self) -> None:
         """Extract complete LSP messages from the stdout buffer."""
@@ -365,9 +470,7 @@ class TyLspClient:
             return
 
         if "error" in message:
-            fut.set_exception(
-                RuntimeError(f"ty server error: {message['error']}")
-            )
+            fut.set_exception(RuntimeError(f"ty server error: {message['error']}"))
         else:
             fut.set_result(message.get("result"))
 
@@ -383,7 +486,9 @@ class TyLspClient:
         timeout: float = _LSP_TIMEOUT_SEC,
     ) -> Any:
         """Send an LSP request synchronously and return the response."""
-        return self._bg.run(self._request(method, params, timeout=timeout), timeout=timeout + 10)
+        return self._bg.run(
+            self._request(method, params, timeout=timeout), timeout=timeout + 10
+        )
 
     async def _request(
         self,
@@ -392,10 +497,18 @@ class TyLspClient:
         *,
         timeout: float = _LSP_TIMEOUT_SEC,
     ) -> Any:
-        """Send an LSP request and await the response."""
+        """Send an LSP request and await the response.
+
+        The lock is only held during the send (to serialise message framing
+        and ID assignment), then released before waiting for the response.
+        This allows concurrent requests and notifications to proceed while
+        a response is pending.
+        """
         async with self._lock:
             if not self._started:
-                raise RuntimeError("ty server not started")
+                # Server may have crashed and been cleaned up by
+                # _reader_loop.  Restart it transparently.
+                await self._start()
 
             msg_id = self._next_id
             self._next_id += 1
@@ -412,21 +525,22 @@ class TyLspClient:
 
             await self._send(message)
 
-            try:
-                return await asyncio.wait_for(fut, timeout=timeout)
-            except asyncio.TimeoutError:
-                self._pending.pop(msg_id, None)
-                raise
+        # Lock released — wait for the response outside the critical section.
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._pending.pop(msg_id, None)
+            raise
 
     def notify(self, method: str, params: Optional[dict] = None) -> None:
         """Send an LSP notification synchronously."""
-        self._bg.run(self._notify(method, params), timeout=10)
+        self._bg.run(self._notify(method, params), timeout=60)
 
     async def _notify(self, method: str, params: Optional[dict] = None) -> None:
         """Send an LSP notification (no response expected)."""
         async with self._lock:
             if not self._started:
-                raise RuntimeError("ty server not started")
+                await self._start()
 
             message = {
                 "jsonrpc": "2.0",
@@ -434,6 +548,54 @@ class TyLspClient:
                 "params": params or {},
             }
             await self._send(message)
+
+    # ------------------------------------------------------------------ #
+    # Lock-free send helpers (used by _start to avoid self-deadlock)
+    # ------------------------------------------------------------------ #
+
+    async def _send_request(
+        self,
+        method: str,
+        params: Optional[dict] = None,
+        *,
+        timeout: float = _LSP_TIMEOUT_SEC,
+    ) -> Any:
+        """Send an LSP request without acquiring self._lock.
+
+        Used by :meth:`_start` which may be called from within :meth:`_request`
+        (which already holds the lock).  Caller must ensure no concurrent
+        access to ``_next_id`` / ``_pending``.
+        """
+        msg_id = self._next_id
+        self._next_id += 1
+
+        message = {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "method": method,
+            "params": params or {},
+        }
+
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[msg_id] = fut
+
+        await self._send(message)
+
+        # Lock released — wait for the response outside the critical section.
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._pending.pop(msg_id, None)
+            raise
+
+    async def _send_notify(self, method: str, params: Optional[dict] = None) -> None:
+        """Send an LSP notification without acquiring self._lock."""
+        message = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params or {},
+        }
+        await self._send(message)
 
     # ------------------------------------------------------------------ #
     # High-level LSP operations (sync)
