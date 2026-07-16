@@ -21,7 +21,6 @@ import os
 import re
 import threading
 import time
-import urllib.parse
 from pathlib import Path
 from typing import Optional
 
@@ -30,14 +29,20 @@ from tree_sitter import Language, Parser
 
 from metalgate_code.context.cache import _CACHE_MISS
 from metalgate_code.context.gopls_lsp_client import GoplsLspClient
-from metalgate_code.context.tracer_base import _MAX_CALLERS, Tracer
-from metalgate_code.factory.microsandbox_backend import MicrosandboxBackend
+from metalgate_code.context.tracer_base import (
+    _MAX_CALLERS,
+    Tracer,
+    TreeSitterConfig,
+    _lsp_symbol_kind_to_str,
+    _name_col_on_line,
+    _path_to_uri,
+    _uri_to_path,
+)
 
 logger = logging.getLogger("metalgate_code")
 
 # Tree-sitter Go language — shared across all parses.
 _TS_GO_LANGUAGE = Language(tsgo.language())
-_TS_GO_PARSER = Parser(_TS_GO_LANGUAGE)
 
 # Markers for Go stdlib source paths (GOROOT).  Used to skip outline lookups
 # for stdlib definitions — they are noise and the files live outside the
@@ -47,36 +52,6 @@ _GO_STDLIB_MARKERS = (
     "/go/src/",  # Official installer: /usr/local/go/src/
     "/sdk/go*/src/",  # Multiple-version installs
 )
-
-# LSP SymbolKind enum values → human-readable names (shared with Python).
-_LSP_SYMBOL_KINDS = {
-    1: "file",
-    2: "module",
-    3: "namespace",
-    4: "package",
-    5: "class",
-    6: "method",
-    7: "property",
-    8: "field",
-    9: "constructor",
-    10: "enum",
-    11: "interface",
-    12: "function",
-    13: "variable",
-    14: "constant",
-    15: "string",
-    16: "number",
-    17: "boolean",
-    18: "array",
-    19: "object",
-    20: "key",
-    21: "null",
-    22: "enum_member",
-    23: "struct",
-    24: "event",
-    25: "operator",
-    26: "type_parameter",
-}
 
 
 def _is_go_stdlib_path(path: str) -> bool:
@@ -90,11 +65,6 @@ def _is_go_stdlib_path(path: str) -> bool:
 # (matching LSP convention).  Column numbers are 0-based.
 
 
-def _ts_parse(source_bytes: bytes):
-    """Parse *source_bytes* with a fresh Parser (thread-safe)."""
-    return Parser(_TS_GO_LANGUAGE).parse(source_bytes)
-
-
 def _ts_col_for_name(source_bytes: bytes, line: int, name: str) -> Optional[int]:
     """Find the 0-based column of *name* on *line* (1-based) using tree-sitter.
 
@@ -106,7 +76,7 @@ def _ts_col_for_name(source_bytes: bytes, line: int, name: str) -> Optional[int]
     Falls back to ``_name_col_on_line`` (regex) if tree-sitter can't find
     the node (e.g. the name is inside a comment or string).
     """
-    tree = _ts_parse(source_bytes)
+    tree = Parser(_TS_GO_LANGUAGE).parse(source_bytes)
     root = tree.root_node
 
     is_selector = "." in name
@@ -150,182 +120,6 @@ def _ts_col_for_name(source_bytes: bytes, line: int, name: str) -> Optional[int]
         if col is not None and is_selector:
             col = col + len(name) - len(member)
     return col
-
-
-def _ts_find_scope_node(
-    source_bytes: bytes,
-    line: int,
-    *,
-    kinds: tuple[str, ...] = (
-        "function_declaration",
-        "method_declaration",
-        "type_declaration",
-    ),
-    containing: bool = False,
-):
-    """Find the tightest (smallest) AST node of the given *kinds* matching *line*.
-
-    *containing*=False → match nodes whose def starts on *line* (start == line).
-    *containing*=True  → match nodes whose body contains *line* (start <= line <= end).
-
-    Returns the tree-sitter node, or None.
-    """
-    tree = _ts_parse(source_bytes)
-    root = tree.root_node
-    best = None
-    best_size = None
-
-    def visit(node):
-        nonlocal best, best_size
-        if node.type in kinds:
-            start = node.start_point[0] + 1  # 1-based
-            end = node.end_point[0] + 1
-            if (containing and start <= line <= end) or (
-                not containing and start == line
-            ):
-                size = end - start
-                if best is None or size < best_size:
-                    best = node
-                    best_size = size
-        for child in node.children:
-            visit(child)
-
-    visit(root)
-    return best
-
-
-def _ts_find_function_containing(
-    source_bytes: bytes, line: int
-) -> Optional[tuple[int, int, Optional[str]]]:
-    """Return (start_1based, end_1based, name) of the innermost function
-    whose body contains *line*, or None.
-    """
-    node = _ts_find_scope_node(
-        source_bytes,
-        line,
-        kinds=("function_declaration", "method_declaration"),
-        containing=True,
-    )
-    if node is None:
-        return None
-    name_node = node.child_by_field_name("name")
-    name = name_node.text.decode("utf-8", errors="replace") if name_node else None
-    return (node.start_point[0] + 1, node.end_point[0] + 1, name)
-
-
-def _ts_find_scope_at_line(source_bytes: bytes, line: int) -> Optional[tuple[int, int]]:
-    """Return (start_0based, end_1based_exclusive) of the scope starting on *line*.
-
-    The tuple is suitable for slicing ``source.splitlines()``:
-    ``lines[start:end]`` gives the full scope body.
-    """
-    node = _ts_find_scope_node(source_bytes, line)
-    if node is None:
-        return None
-    return (node.start_point[0], node.end_point[0] + 1)
-
-
-def _ts_call_positions(
-    source_bytes: bytes, start_line: int, end_line: int
-) -> list[tuple[int, int]]:
-    """Return (line_1based, col_0based) of every call expression in [start_line, end_line].
-
-    For each ``call_expression`` node, the position targets the callable name:
-      - ``foo()``   → position of ``foo``
-      - ``obj.m()`` → position of ``m`` (the field, not the object)
-      - other       → position of the function expression
-    """
-    tree = _ts_parse(source_bytes)
-    root = tree.root_node
-    positions: list[tuple[int, int]] = []
-
-    def visit(node):
-        if node.type == "call_expression":
-            func_node = node.child_by_field_name("function")
-            if func_node is not None:
-                # For selector expressions like `shared.ToContext(...)`,
-                # gopls definition needs the column of the *field* (ToContext),
-                # not the selector start.
-                if func_node.type == "selector_expression":
-                    field_node = func_node.child_by_field_name("field")
-                    pos_node = field_node if field_node is not None else func_node
-                else:
-                    pos_node = func_node
-                line_1 = pos_node.start_point[0] + 1
-                col_0 = pos_node.start_point[1]
-                if start_line <= line_1 <= end_line:
-                    positions.append((line_1, col_0))
-        for child in node.children:
-            visit(child)
-
-    visit(root)
-    return positions
-
-
-def _ts_find_function_and_calls(
-    source_bytes: bytes, line: int
-) -> Optional[tuple[int, int, Optional[str], list[tuple[int, int]]]]:
-    """Find the innermost function containing *line* and all call positions within it.
-
-    Parses once, then does two passes over the tree:
-      1. Find the innermost function/method containing *line*.
-      2. Collect all call positions within that function's line range.
-
-    Returns (start_line, end_line, func_name, positions) or None.
-    """
-    tree = _ts_parse(source_bytes)
-    root = tree.root_node
-
-    # Pass 1: find innermost function containing *line*.
-    best = None
-    best_size = None
-    best_name = None
-
-    def find_fn(node):
-        nonlocal best, best_size, best_name
-        if node.type in ("function_declaration", "method_declaration"):
-            start = node.start_point[0] + 1
-            end = node.end_point[0] + 1
-            if start <= line <= end:
-                size = end - start
-                if best is None or size < best_size:
-                    best = (start, end)
-                    best_size = size
-                    name_node = node.child_by_field_name("name")
-                    best_name = (
-                        name_node.text.decode("utf-8", errors="replace")
-                        if name_node
-                        else None
-                    )
-        for child in node.children:
-            find_fn(child)
-
-    find_fn(root)
-    if best is None:
-        return None
-
-    start_line, end_line = best
-    positions: list[tuple[int, int]] = []
-
-    # Pass 2: collect call positions within the function's line range.
-    def collect_calls(node):
-        if node.type == "call_expression":
-            func_node = node.child_by_field_name("function")
-            if func_node is not None:
-                if func_node.type == "selector_expression":
-                    field_node = func_node.child_by_field_name("field")
-                    pos_node = field_node if field_node is not None else func_node
-                else:
-                    pos_node = func_node
-                cl = pos_node.start_point[0] + 1
-                col = pos_node.start_point[1]
-                if start_line <= cl <= end_line:
-                    positions.append((cl, col))
-        for child in node.children:
-            collect_calls(child)
-
-    collect_calls(root)
-    return (start_line, end_line, best_name, positions)
 
 
 def _ts_go_collect_outline(node, result: list) -> None:
@@ -416,49 +210,11 @@ def _ts_go_collect_outline(node, result: list) -> None:
             _ts_go_collect_outline(child, result)
 
 
-def _name_col_on_line(line_text: str, name: str, occurrence: int = 0) -> Optional[int]:
-    """Column (0-based) of the *occurrence*-th whole-word match of *name*.
-
-    By default returns the first occurrence.  Pass *occurrence* > 0 to
-    resolve later references on the same line (e.g. ``foo(foo)``).
-    """
-    idx = 0
-    for m in re.finditer(rf"\b{re.escape(name)}\b", line_text):
-        if idx == occurrence:
-            return m.start()
-        idx += 1
-    return None
-
-
-def _uri_to_path(uri: str) -> str:
-    """Convert a ``file://`` URI to a filesystem path, decoding percent-encoding."""
-    if uri.startswith("file://"):
-        return urllib.parse.unquote(uri[7:])
-    return urllib.parse.unquote(uri)
-
-
-def _path_to_uri(path: str) -> str:
-    """Convert a filesystem path to a ``file://`` URI."""
-    if path.startswith("file://"):
-        return path
-    return "file://" + str(Path(path).resolve())
-
-
-def _lsp_symbol_kind_to_str(kind_num: int) -> str:
-    """Map an LSP SymbolKind number to a human-readable kind string."""
-    return _LSP_SYMBOL_KINDS.get(kind_num, "unknown")
-
-
 def _parse_hover(hover: object) -> tuple[str, str]:
-    """Extract (signature, docstring) from an LSP hover response.
+    """Extract (signature, docstring) from a gopls LSP hover response.
 
-    LSP hover ``contents`` may be:
-    - MarkupContent (dict with ``value``)
-    - a plain string
-    - a list of MarkedString entries
-
-    The first non-empty line is treated as the signature; the rest as the
-    docstring.  Markdown code fences are stripped if present.
+    gopls-specific post-processing (stripping pkg.go.dev links and ``---``
+    separators) is applied before delegating to :func:`_parse_hover_base`.
     """
     if not hover or not isinstance(hover, dict):
         return "", ""
@@ -506,8 +262,8 @@ def _parse_hover(hover: object) -> tuple[str, str]:
     if lines and lines[0].strip().startswith("```"):
         lines = lines[1:]
         # Find the closing fence (a line that is just ```)
-        for i, l in enumerate(lines):
-            if l.strip() == "```":
+        for i, ln in enumerate(lines):
+            if ln.strip() == "```":
                 del lines[i]
                 break
     if not lines:
@@ -525,6 +281,21 @@ def _parse_hover(hover: object) -> tuple[str, str]:
 class GoTracer(Tracer):
     """Go-specific tracer using tree-sitter-go and gopls LSP."""
 
+    _ts_config = TreeSitterConfig(
+        language=_TS_GO_LANGUAGE,
+        function_kinds=("function_declaration", "method_declaration"),
+        scope_kinds=(
+            "function_declaration",
+            "method_declaration",
+            "type_declaration",
+        ),
+        call_node_type="call_expression",
+        member_node_type="selector_expression",
+        member_field_name="field",
+    )
+
+    _def_keywords = ("func ", "type ")
+
     def __init__(
         self,
         root: str,
@@ -538,7 +309,6 @@ class GoTracer(Tracer):
         # requests cause "content modified" errors.  RLock (not Lock) so
         # _resolve can call find_symbol while already holding the lock.
         self._lsp_request_lock = threading.RLock()
-        self._open_docs: set[str] = set()  # URIs already opened via did_open
 
     # Path translation (sandbox ↔ host)
     #
@@ -549,54 +319,23 @@ class GoTracer(Tracer):
     # Conversely, gopls response URIs contain host paths that must be
     # translated back to sandbox paths for the agent.
 
-    def _to_host_path(self, file: str) -> str:
-        """Translate a sandbox path to a host path for gopls.
-
-        When the backend is a MicrosandboxBackend, sandbox paths like
-        ``/workspace/orders.go`` are translated to the host path
-        ``/Users/foo/project/orders.go``.
-
-        For other backends (e.g. LocalShellBackend), the path is
-        returned unchanged.
-        """
-        if isinstance(self.backend, MicrosandboxBackend):
-            return self.backend._to_host_path(file)
-        return file
-
-    def _to_sandbox_path(self, path: str) -> str:
-        """Translate a host path back to a sandbox path for the agent.
-
-        When the backend is a MicrosandboxBackend, host paths like
-        ``/Users/foo/project/orders.go`` are translated to the sandbox
-        path ``/workspace/orders.go``.
-
-        For other backends (e.g. LocalShellBackend), the path is
-        returned unchanged.
-        """
-        if isinstance(self.backend, MicrosandboxBackend):
-            return self.backend._to_guest_path(path)
-        return path
-
     def _to_host_uri(self, file: str) -> str:
         """Create a ``file://`` URI using the host path (for gopls)."""
         return _path_to_uri(self._to_host_path(file))
 
     def _uri_to_sandbox_path(self, uri: str) -> str:
         """Convert a gopls ``file://`` URI to a sandbox path for the agent."""
-        return self._to_sandbox_path(_uri_to_path(uri))
+        return self._to_guest_path(_uri_to_path(uri))
+
+    def _uri_to_result_path(self, uri: str) -> str:
+        """Convert a gopls ``file://`` URI to a sandbox path for the agent.
+
+        gopls runs on the host and returns host paths in its URIs.  The
+        agent works with sandbox paths, so we translate host → guest.
+        """
+        return self._uri_to_sandbox_path(uri)
 
     # LSP document lifecycle
-
-    def _did_open(self, lsp: GoplsLspClient, uri: str, source: str) -> None:
-        """Open *uri* in the LSP server if not already open.
-
-        did_open must be called once per document; repeated calls cause
-        server errors.  Always called within _lsp_request_lock.
-        """
-        if uri in self._open_docs:
-            return
-        self._open_docs.add(uri)
-        lsp.did_open(uri, source)
 
     def _get_lsp(self) -> GoplsLspClient:
         """Get or lazily create the gopls LSP client (double-checked locking)."""
@@ -633,7 +372,7 @@ class GoTracer(Tracer):
 
     def _ts_outline(self, source_bytes: bytes, file: str) -> list[dict]:
         """Extract outline using tree-sitter (no LSP round-trip needed)."""
-        tree = _TS_GO_PARSER.parse(source_bytes)
+        tree = self._ts_parse(source_bytes)
         result: list[dict] = []
         _ts_go_collect_outline(tree.root_node, result)
         for sym in result:
@@ -661,55 +400,6 @@ class GoTracer(Tracer):
         if result is not None:
             self.cache.set_definition(file, line, name, result)
         return result
-
-    def get_source(self, file: str, line: int, context: int = 60) -> dict:
-        """Return the full source of the function/method/struct/interface
-        containing *line*.
-
-        If tree-sitter finds a scope containing *line*, the entire scope body
-        is returned and *context* is ignored.  Otherwise, a fallback window
-        of *context* lines centred around *line* is returned.
-        """
-        try:
-            source_bytes = self._read_file_bytes(file)
-            source = source_bytes.decode("utf-8", errors="replace")
-            all_lines = source.splitlines()
-
-            scope = _ts_find_scope_at_line(source_bytes, line)
-
-            if scope:
-                start, end = scope
-                fallback = False
-            else:
-                logger.warning(
-                    "get_source: no scope found at %s:%d, falling back to "
-                    "context window of %d lines",
-                    file,
-                    line,
-                    context,
-                )
-                centre = line - 1
-                start = max(0, centre - context // 2)
-                end = min(len(all_lines), centre + (context + 1) // 2)
-                fallback = True
-
-            snippet = all_lines[start:end]
-            return {
-                "file": file,
-                "start_line": start + 1,
-                "end_line": end,
-                "source": "\n".join(snippet),
-                "fallback": fallback,
-            }
-        except OSError as exc:
-            return {
-                "file": file,
-                "start_line": 0,
-                "end_line": 0,
-                "source": "",
-                "fallback": True,
-                "error": str(exc),
-            }
 
     def get_callers(self, file: str, line: int) -> list[dict]:
         """Find every place in the project that **directly** calls the symbol
@@ -848,7 +538,7 @@ class GoTracer(Tracer):
             return []
 
         # Single tree walk: find the function and collect all call positions.
-        func_info = _ts_find_function_and_calls(
+        func_info = self._ts_find_function_and_calls(
             source.encode("utf-8", errors="replace"), line
         )
         if func_info is None:
@@ -1224,56 +914,7 @@ class GoTracer(Tracer):
             "docstring": docstring,
         }
 
-    def _find_symbol_at_line(
-        self, outline: list[dict], line: int, *, exact: bool = False
-    ) -> Optional[dict]:
-        """Find the symbol at *line* in *outline*.
-
-        If *exact*, return the symbol whose ``line`` matches exactly.
-        Otherwise, return the tightest enclosing scope (smallest range
-        containing *line*).
-        """
-        best = None
-        best_size = float("inf")
-        for sym in outline:
-            if exact:
-                if sym["line"] == line:
-                    return sym
-            elif sym["line"] <= line <= sym["end_line"]:
-                size = sym["end_line"] - sym["line"]
-                if size < best_size:
-                    best = sym
-                    best_size = size
-        return best
-
-    def _extract_def_info(self, d: dict) -> Optional[tuple[str, int, int, str]]:
-        """Extract (file, line_1based, col, uri) from a single LSP
-        definition dict.  Returns None if the dict has no valid uri.
-        """
-        d_uri = d.get("uri", "")
-        if not d_uri:
-            return None
-        d_file = self._uri_to_sandbox_path(d_uri)
-        d_range = d.get("range", {})
-        d_line = d_range.get("start", {}).get("line", 0) + 1
-        d_col = d_range.get("start", {}).get("character", 0)
-        return d_file, d_line, d_col, d_uri
-
-    def _first_name_on_line(self, file: str, line: int) -> Optional[str]:
-        """Return the first identifier-like token on *line* of *file*."""
-        try:
-            source = self._read_file(file)
-            lines = source.splitlines()
-            if line < 1 or line > len(lines):
-                return None
-            text = lines[line - 1]
-            for m in re.finditer(r"\b[a-zA-Z_]\w*\b", text):
-                return m.group()
-        except OSError:
-            logger.warning(
-                "Failed to read %s for _first_name_on_line", file, exc_info=True
-            )
-        return None
+    # Go-specific overrides for definition-line parsing
 
     def _def_name_col_from_lines(self, lines: list[str], line: int) -> Optional[int]:
         """Column of the name token on a func/type line.
