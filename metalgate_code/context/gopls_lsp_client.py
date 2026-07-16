@@ -35,9 +35,7 @@ class GoplsLspClient(LspBaseClient):
         self._cwd = cwd or os.getcwd()
         self._process: Optional[asyncio.subprocess.Process] = None
 
-    # ------------------------------------------------------------------ #
     # Server lifecycle (transport-specific)
-    # ------------------------------------------------------------------ #
 
     async def _start_server(self) -> None:
         gopls_bin = shutil.which("gopls")
@@ -86,9 +84,7 @@ class GoplsLspClient(LspBaseClient):
                 pass
             self._process = None
 
-    # ------------------------------------------------------------------ #
     # Transport-specific read/write
-    # ------------------------------------------------------------------ #
 
     async def _write_raw(self, frame: bytes) -> None:
         if self._process is None or self._process.stdin is None:
@@ -107,9 +103,7 @@ class GoplsLspClient(LspBaseClient):
             return None
         return data
 
-    # ------------------------------------------------------------------ #
     # High-level LSP operations (go-specific overrides)
-    # ------------------------------------------------------------------ #
 
     def did_open(self, uri: str, text: str, language_id: str = "go") -> None:
         """Notify the server that a document was opened."""

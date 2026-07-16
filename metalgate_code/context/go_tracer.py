@@ -84,12 +84,10 @@ def _is_go_stdlib_path(path: str) -> bool:
     return any(marker in path for marker in _GO_STDLIB_MARKERS)
 
 
-# ----------------------------------------------------------------------- #
 # Tree-sitter helpers
 #
 # All tree-sitter functions take raw bytes and return 1-based line numbers
 # (matching LSP convention).  Column numbers are 0-based.
-# ----------------------------------------------------------------------- #
 
 
 def _ts_parse(source_bytes: bytes):
@@ -542,7 +540,6 @@ class GoTracer(Tracer):
         self._lsp_request_lock = threading.RLock()
         self._open_docs: set[str] = set()  # URIs already opened via did_open
 
-    # ------------------------------------------------------------------ #
     # Path translation (sandbox ↔ host)
     #
     # gopls runs on the HOST as a local subprocess.  When the backend is
@@ -551,7 +548,6 @@ class GoTracer(Tracer):
     # (e.g. ``/Users/foo/project/orders.go``) before sending to gopls.
     # Conversely, gopls response URIs contain host paths that must be
     # translated back to sandbox paths for the agent.
-    # ------------------------------------------------------------------ #
 
     def _to_host_path(self, file: str) -> str:
         """Translate a sandbox path to a host path for gopls.
@@ -589,9 +585,7 @@ class GoTracer(Tracer):
         """Convert a gopls ``file://`` URI to a sandbox path for the agent."""
         return self._to_sandbox_path(_uri_to_path(uri))
 
-    # ------------------------------------------------------------------ #
     # LSP document lifecycle
-    # ------------------------------------------------------------------ #
 
     def _did_open(self, lsp: GoplsLspClient, uri: str, source: str) -> None:
         """Open *uri* in the LSP server if not already open.
@@ -618,9 +612,7 @@ class GoTracer(Tracer):
             self._lsp.start()
             return self._lsp
 
-    # ------------------------------------------------------------------ #
     # Tracer interface
-    # ------------------------------------------------------------------ #
 
     def get_file_outline(self, file: str) -> list[dict]:
         """Parse *file* and return every func/method/struct/interface with
@@ -1087,9 +1079,7 @@ class GoTracer(Tracer):
                 return [Path(m["path"]) for m in result.matches]
         return list(self.root.rglob("*.go"))
 
-    # ------------------------------------------------------------------ #
     # Private helpers
-    # ------------------------------------------------------------------ #
 
     def _resolve(self, file: str, line: int, name: str) -> Optional[dict]:
         """Resolve *name* at *line* in *file* to its definition via LSP.

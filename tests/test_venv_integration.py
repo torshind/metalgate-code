@@ -16,9 +16,7 @@ import pytest
 
 from metalgate_code.factory.microsandbox_backend import MicrosandboxBackend
 
-# --------------------------------------------------------------------------- #
 # Sample projects
-# --------------------------------------------------------------------------- #
 
 SAMPLES = Path(__file__).parent / "sample"
 SAMPLE_PYTHON = SAMPLES / "python"  # uv.lock (default)
@@ -38,9 +36,7 @@ def _copy_sample(src: Path, dest: Path) -> None:
             shutil.copy2(item, dest / item.name)
 
 
-# --------------------------------------------------------------------------- #
 # Tests: venv creation by manifest type
-# --------------------------------------------------------------------------- #
 
 
 @pytest.mark.asyncio
@@ -150,9 +146,7 @@ class TestVenvCreation:
             await b.stop()
 
 
-# --------------------------------------------------------------------------- #
 # Tests: venv reuse and marker
-# --------------------------------------------------------------------------- #
 
 
 @pytest.mark.asyncio

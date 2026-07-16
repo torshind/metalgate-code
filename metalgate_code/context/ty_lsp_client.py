@@ -64,9 +64,7 @@ class TyLspClient(LspBaseClient):
         self._venv_bin = venv_bin
         self._venv_env = venv_env
 
-    # ------------------------------------------------------------------ #
     # Abstract shell / filesystem helpers (transport-specific)
-    # ------------------------------------------------------------------ #
 
     @abstractmethod
     async def _shell(
@@ -90,9 +88,7 @@ class TyLspClient(LspBaseClient):
     async def _resolve_ty_command(self) -> str:
         """Return the ty command to launch (path or name)."""
 
-    # ------------------------------------------------------------------ #
     # Shared ty setup logic
-    # ------------------------------------------------------------------ #
 
     async def _ensure_ty_installed(self) -> None:
         """Install ty if not present and ensure a pyproject.toml exists.
@@ -223,9 +219,7 @@ class TyLspClient(LspBaseClient):
 
         return paths
 
-    # ------------------------------------------------------------------ #
     # Shared LSP initialization
-    # ------------------------------------------------------------------ #
 
     def _customize_init_params(self, params: dict[str, Any]) -> None:
         if self._python_path:
@@ -268,9 +262,7 @@ class SandboxTyLspClient(TyLspClient):
         self._handle = None
         self._stdin = None
 
-    # ------------------------------------------------------------------ #
     # Shell / filesystem helpers (sandbox)
-    # ------------------------------------------------------------------ #
 
     async def _shell(
         self,
@@ -304,9 +296,7 @@ class SandboxTyLspClient(TyLspClient):
                 return ty_bin
         return "ty"
 
-    # ------------------------------------------------------------------ #
     # Server lifecycle (sandbox transport)
-    # ------------------------------------------------------------------ #
 
     async def _start_server(self) -> None:
         await self._ensure_ty_installed()
@@ -362,9 +352,7 @@ class SandboxTyLspClient(TyLspClient):
                 pass
             self._handle = None
 
-    # ------------------------------------------------------------------ #
     # Transport-specific read/write (sandbox)
-    # ------------------------------------------------------------------ #
 
     async def _write_raw(self, frame: bytes) -> None:
         if self._stdin is None:
@@ -406,9 +394,7 @@ class LocalTyLspClient(TyLspClient):
         super().__init__(root_uri, python_path=python_path)
         self._process: Optional[asyncio.subprocess.Process] = None
 
-    # ------------------------------------------------------------------ #
     # Shell / filesystem helpers (local)
-    # ------------------------------------------------------------------ #
 
     async def _shell(
         self,
@@ -453,9 +439,7 @@ class LocalTyLspClient(TyLspClient):
             raise FileNotFoundError("ty not found in PATH")
         return ty_bin
 
-    # ------------------------------------------------------------------ #
     # Server lifecycle (local transport)
-    # ------------------------------------------------------------------ #
 
     async def _start_server(self) -> None:
         await self._ensure_ty_installed()
@@ -507,9 +491,7 @@ class LocalTyLspClient(TyLspClient):
                 pass
             self._process = None
 
-    # ------------------------------------------------------------------ #
     # Transport-specific read/write (local)
-    # ------------------------------------------------------------------ #
 
     async def _write_raw(self, frame: bytes) -> None:
         if self._process is None or self._process.stdin is None:

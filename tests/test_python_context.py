@@ -295,9 +295,7 @@ class TestFindSymbol:
         assert "Order" in names
 
 
-# --------------------------------------------------------------------------- #
 # Unit tests for module-level helper functions (no sandbox/LSP required)
-# --------------------------------------------------------------------------- #
 
 
 class TestUriToPathPercentDecoding:
@@ -474,9 +472,7 @@ class TestTsFindFunctionContaining:
         assert result is None
 
 
-# --------------------------------------------------------------------------- #
 # Edge case integration tests (require sandbox/LSP via `tools` fixture)
-# --------------------------------------------------------------------------- #
 
 
 class TestEdgeCasesOutline:
@@ -490,8 +486,8 @@ class TestEdgeCasesOutline:
     def test_decorated_function_line_is_def_not_decorator(self, tools):
         symbols = tools["get_file_outline"](EDGE_FILE)
         cached = next(s for s in symbols if s["name"] == "cached_function")
-        # Line 13 is the `def` line; line 12 is `@functools.lru_cache`
-        assert cached["line"] == 13
+        # Line 12 is the `def` line; line 11 is `@functools.lru_cache`
+        assert cached["line"] == 12
 
     def test_finds_async_function(self, tools):
         symbols = tools["get_file_outline"](EDGE_FILE)
@@ -624,9 +620,7 @@ class TestEdgeCasesGetCallers:
         assert "async_with_nested" in caller_names
 
 
-# --------------------------------------------------------------------------- #
 # Unit tests for edge-case helper functions (no sandbox/LSP required)
-# --------------------------------------------------------------------------- #
 
 
 class TestTsIsStubFunction:

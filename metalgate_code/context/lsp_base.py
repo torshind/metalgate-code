@@ -98,9 +98,7 @@ class LspBaseClient:
         self._started = False
         self._bg = _BackgroundLoop()
 
-    # ------------------------------------------------------------------ #
     # Lifecycle — subclasses implement the transport-specific parts
-    # ------------------------------------------------------------------ #
 
     def start(self) -> None:
         """Boot the server process and complete the LSP initialize handshake."""
@@ -174,9 +172,7 @@ class LspBaseClient:
         self._started = False
         self._stdout_buf.clear()
 
-    # ------------------------------------------------------------------ #
     # Hooks for subclasses
-    # ------------------------------------------------------------------ #
 
     async def _start_server(self) -> None:
         """Launch the server process and set up ``self._stdin`` / ``self._handle``.
@@ -195,9 +191,7 @@ class LspBaseClient:
         """Hook for subclasses to add initializationOptions or other fields."""
         pass
 
-    # ------------------------------------------------------------------ #
     # LSP message framing
-    # ------------------------------------------------------------------ #
 
     async def _send(self, message: dict) -> None:
         """Write a single LSP message to the server's stdin."""
@@ -297,9 +291,7 @@ class LspBaseClient:
         else:
             fut.set_result(message.get("result"))
 
-    # ------------------------------------------------------------------ #
     # Public LSP request methods (sync wrappers)
-    # ------------------------------------------------------------------ #
 
     def request(
         self,
@@ -372,9 +364,7 @@ class LspBaseClient:
             }
             await self._send(message)
 
-    # ------------------------------------------------------------------ #
     # Lock-free send helpers (used by _start to avoid self-deadlock)
-    # ------------------------------------------------------------------ #
 
     async def _send_request(
         self,
@@ -420,9 +410,7 @@ class LspBaseClient:
         }
         await self._send(message)
 
-    # ------------------------------------------------------------------ #
     # High-level LSP operations (sync)
-    # ------------------------------------------------------------------ #
 
     def did_open(self, uri: str, text: str, language_id: str = "") -> None:
         """Notify the server that a document was opened."""
