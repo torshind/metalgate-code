@@ -73,12 +73,10 @@ _LSP_SYMBOL_KINDS = {
 }
 
 
-# ----------------------------------------------------------------------- #
 # Tree-sitter helpers
 #
 # All tree-sitter functions take raw bytes and return 1-based line numbers
 # (matching LSP convention).  Column numbers are 0-based.
-# ----------------------------------------------------------------------- #
 
 
 def _ts_parse(source_bytes: bytes):
@@ -464,9 +462,7 @@ class PythonTracer(Tracer):
         """True when the backend is a MicrosandboxBackend."""
         return isinstance(self.backend, MicrosandboxBackend)
 
-    # ------------------------------------------------------------------ #
     # Path translation (host ↔ guest)
-    # ------------------------------------------------------------------ #
 
     def _to_guest_path(self, file: str) -> str:
         """Translate a host path to a guest path (sandbox only).
@@ -488,9 +484,7 @@ class PythonTracer(Tracer):
             return self.ms._to_host_path(path)
         return path
 
-    # ------------------------------------------------------------------ #
     # LSP document lifecycle
-    # ------------------------------------------------------------------ #
 
     def _did_open(self, lsp: TyLspClient, uri: str, source: str) -> None:
         """Open *uri* in the LSP server if not already open.
@@ -535,9 +529,7 @@ class PythonTracer(Tracer):
             self._lsp.start()
             return self._lsp
 
-    # ------------------------------------------------------------------ #
     # Tracer interface
-    # ------------------------------------------------------------------ #
 
     def get_file_outline(self, file: str) -> list[dict]:
         """Parse *file* and return every class/function/method with
@@ -1011,9 +1003,7 @@ class PythonTracer(Tracer):
 
         return results
 
-    # ------------------------------------------------------------------ #
     # Private helpers
-    # ------------------------------------------------------------------ #
 
     def _resolve(self, file: str, line: int, name: str) -> Optional[dict]:
         """Resolve *name* at *line* in *file* to its definition via LSP.

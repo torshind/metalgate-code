@@ -116,7 +116,7 @@ class TestGotoDefinition:
         assert "docstring" in result
         assert result["docstring"] == ""
 
-    # --- Selector resolution (Bug 1 & 2) ---
+    # Selector resolution (Bug 1 & 2)
 
     def test_resolves_qualified_stdlib_call(self, tools):
         """goto_definition on a qualified stdlib call like fmt.Sprintf

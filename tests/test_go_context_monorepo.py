@@ -201,7 +201,7 @@ class TestGotoDefinitionCrossPackage:
     def _basename(path: str) -> str:
         return path.replace("\\", "/").rstrip("/").split("/")[-1]
 
-    # ---- cross-package function: shared.ToContext -----------------------
+    # cross-package function: shared.ToContext
     #
     # controller.go (package api) calls shared.ToContext, which is defined
     # in context.go (package shared) in a different directory.
@@ -247,7 +247,7 @@ class TestGotoDefinitionCrossPackage:
             "not the member"
         )
 
-    # ---- cross-package function: api.NewController -----------------------
+    # cross-package function: api.NewController
     #
     # client.go (package client) calls api.NewController, which is defined
     # in controller.go (package api) in a different directory.
@@ -273,7 +273,7 @@ class TestGotoDefinitionCrossPackage:
             f"got {result.get('signature', '')!r}"
         )
 
-    # ---- cross-package method: c.ctrl.Publish ----------------------------
+    # cross-package method: c.ctrl.Publish
     #
     # client.go (package client) calls c.ctrl.Publish, where Publish is a
     # method on *Controller defined in controller.go (package api).
@@ -319,7 +319,7 @@ class TestGotoDefinitionCrossPackage:
             "(column points at the receiver/field, not the method)"
         )
 
-    # ---- cross-package from e2e-tests -------------------------------------
+    # cross-package from e2e-tests
     #
     # test.go (package suite) calls api.NewController and r.ctrl.Publish,
     # both defined in controller.go (package api).  The e2e-tests directory
@@ -364,7 +364,6 @@ class TestGotoDefinitionCrossPackage:
         )
 
 
-# ---------------------------------------------------------------------------
 # goto_definition — same-package, different file
 #
 # This reproduces the gin bug where a method call like `c.Next` in
@@ -380,7 +379,6 @@ class TestGotoDefinitionCrossPackage:
 # Ground truth (controller.go):
 #     line 16: func (c *Controller) Publish(key string, val int) map[string]string
 #     line 21: func (c *Controller) Lookup(ctx map[string]string, key string) (string, error)
-# ---------------------------------------------------------------------------
 class TestGotoDefinitionSamePackage:
     """Resolves method calls within the same package but a different file.
 
@@ -394,7 +392,7 @@ class TestGotoDefinitionSamePackage:
     def _basename(path: str) -> str:
         return path.replace("\\", "/").rstrip("/").split("/")[-1]
 
-    # ---- c.Publish: middleware.go:8 -> controller.go:16 ------------------
+    # c.Publish: middleware.go:8 -> controller.go:16
 
     def test_resolves_same_package_method_publish(self, tools):
         """c.Publish (middleware.go:8) must resolve to controller.go:16
@@ -446,7 +444,7 @@ class TestGotoDefinitionSamePackage:
             f"resolved to a variable declaration: {result['signature']!r}"
         )
 
-    # ---- c.Lookup: middleware.go:14 -> controller.go:21 -----------------
+    # c.Lookup: middleware.go:14 -> controller.go:21
 
     def test_resolves_same_package_method_lookup(self, tools):
         """c.Lookup (middleware.go:14) must resolve to controller.go:21
@@ -492,7 +490,6 @@ class TestGotoDefinitionSamePackage:
         )
 
 
-# ---------------------------------------------------------------------------
 # goto_definition — interface method called across packages
 #
 # This reproduces the gin bug where `r.Render` in context.go (package gin)
@@ -506,7 +503,6 @@ class TestGotoDefinitionSamePackage:
 # Ground truth (renderer.go):
 #     line 10: 	Render(dest string) error          (interface method)
 #     line 12: 	WriteContentType() string          (interface method)
-# ---------------------------------------------------------------------------
 class TestGotoDefinitionInterfaceMethod:
     """Resolves interface method calls across packages.
 
@@ -523,7 +519,7 @@ class TestGotoDefinitionInterfaceMethod:
     def _basename(path: str) -> str:
         return path.replace("\\", "/").rstrip("/").split("/")[-1]
 
-    # ---- r.WriteContentType: render_call.go:12 -> renderer.go:12 ---------
+    # r.WriteContentType: render_call.go:12 -> renderer.go:12
 
     def test_resolves_interface_method_write_content_type(self, tools):
         """r.WriteContentType (render_call.go:12) must resolve to
@@ -587,7 +583,7 @@ class TestGotoDefinitionInterfaceMethod:
             "receiver, not the member"
         )
 
-    # ---- r.Render: render_call.go:14 -> renderer.go:10 ------------------
+    # r.Render: render_call.go:14 -> renderer.go:10
 
     def test_resolves_interface_method_render(self, tools):
         """r.Render (render_call.go:14) must resolve to renderer.go:10
@@ -646,7 +642,6 @@ class TestGotoDefinitionInterfaceMethod:
         )
 
 
-# ---------------------------------------------------------------------------
 # goto_definition — 3rd-party package qualified call
 #
 # This reproduces the gin bug where `gin.New()` in external.go must resolve
@@ -658,7 +653,6 @@ class TestGotoDefinitionInterfaceMethod:
 # Ground truth (gin v1.12.0):
 #     gin.go:202  func New(opts ...OptionFunc) *Engine
 #     gin.go:236  func Default(opts ...OptionFunc) *Engine
-# ---------------------------------------------------------------------------
 class TestGotoDefinitionThirdParty:
     """Resolves qualified calls to 3rd-party package functions.
 
@@ -672,7 +666,7 @@ class TestGotoDefinitionThirdParty:
     def _basename(path: str) -> str:
         return path.replace("\\", "/").rstrip("/").split("/")[-1]
 
-    # ---- gin.New: gin_call.go:11 -> gin.go:202 ---------------------------
+    # gin.New: gin_call.go:11 -> gin.go:202
 
     def test_resolves_third_party_gin_new(self, tools):
         """gin.New (gin_call.go:11) must resolve to gin.go (the 3rd-party
@@ -729,7 +723,7 @@ class TestGotoDefinitionThirdParty:
             f"expected col in [13, 16] (the 'New' member), got col={result['col']}"
         )
 
-    # ---- gin.Default: gin_call.go:16 -> gin.go:236 -----------------------
+    # gin.Default: gin_call.go:16 -> gin.go:236
 
     def test_resolves_third_party_gin_default(self, tools):
         """gin.Default (gin_call.go:16) must resolve to gin.go:236.
@@ -773,7 +767,6 @@ class TestGotoDefinitionThirdParty:
         )
 
 
-# ---------------------------------------------------------------------------
 # goto_definition — method calls inside function literals (closures)
 #
 # This reproduces the core gin bug.  In gin's recovery.go,
@@ -800,7 +793,6 @@ class TestGotoDefinitionThirdParty:
 #
 # The first three (returned/assigned/passed) reproduce the bug.
 # The last two (immediate-invoke, direct) are control cases that already work.
-# ---------------------------------------------------------------------------
 class TestGotoDefinitionInClosure:
     """Resolves method calls inside function literals (closures).
 
@@ -820,7 +812,7 @@ class TestGotoDefinitionInClosure:
     def _basename(path: str) -> str:
         return path.replace("\\", "/").rstrip("/").split("/")[-1]
 
-    # ---- returned closure: closure.go:21 --------------------------------
+    # returned closure: closure.go:21
 
     def test_resolves_method_in_returned_closure(self, tools):
         """c.Publish inside a returned func literal (closure.go:21) must
@@ -862,7 +854,7 @@ class TestGotoDefinitionInClosure:
             f"expected col in [12, 19] (the 'Publish' member), got col={result['col']}"
         )
 
-    # ---- assigned closure: closure.go:29 --------------------------------
+    # assigned closure: closure.go:29
 
     def test_resolves_method_in_assigned_closure(self, tools):
         """c.Publish inside an assigned func literal (closure.go:29) must
@@ -889,7 +881,7 @@ class TestGotoDefinitionInClosure:
             f"expected kind 'method', got {result['kind']!r}"
         )
 
-    # ---- passed closure: closure.go:38 ----------------------------------
+    # passed closure: closure.go:38
 
     def test_resolves_method_in_passed_closure(self, tools):
         """c.Publish inside a func literal passed as an argument
@@ -916,7 +908,7 @@ class TestGotoDefinitionInClosure:
             f"expected kind 'method', got {result['kind']!r}"
         )
 
-    # ---- control: immediately-invoked closure: closure.go:51 -------------
+    # control: immediately-invoked closure: closure.go:51
 
     def test_resolves_method_in_immediate_invoke_closure(self, tools):
         """c.Publish inside an immediately-invoked func literal
@@ -929,7 +921,7 @@ class TestGotoDefinitionInClosure:
         )
         assert result["line"] == 16, f"expected line 16, got {result.get('line')}"
 
-    # ---- control: direct call: closure.go:58 ----------------------------
+    # control: direct call: closure.go:58
 
     def test_resolves_method_direct_call(self, tools):
         """c.Publish as a direct call with no closure (closure.go:58) must
@@ -942,7 +934,7 @@ class TestGotoDefinitionInClosure:
         )
         assert result["line"] == 16, f"expected line 16, got {result.get('line')}"
 
-    # ---- consistency: all five patterns resolve to the same target -------
+    # consistency: all five patterns resolve to the same target
 
     def test_all_closure_patterns_resolve_same_target(self, tools):
         """All five c.Publish call sites in closure.go must resolve to the

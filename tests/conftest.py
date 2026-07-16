@@ -70,9 +70,7 @@ class RecordingClient(Client):
         self.permission_requests: list[dict[str, Any]] = []
         self.auto_approve = auto_approve
 
-    # ------------------------------------------------------------------ #
     # Path translation
-    # ------------------------------------------------------------------ #
 
     def _to_host_path(self, path: str) -> str:
         """Translate a sandbox path (``/workspace/...``) to a host path."""

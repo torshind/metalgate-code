@@ -45,9 +45,7 @@ class Tracer(ABC):
         """Read file content as bytes using backend if available."""
         return self._read_file(file, limit=limit).encode("utf-8", errors="ignore")
 
-    # ------------------------------------------------------------------ #
     # public interface — every subclass must implement these six methods
-    # ------------------------------------------------------------------ #
 
     @abstractmethod
     def get_file_outline(self, file: str) -> list[dict]:

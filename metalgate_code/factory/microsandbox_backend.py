@@ -171,9 +171,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         else:
             _run_async(self._precache_image())
 
-    # ------------------------------------------------------------------ #
     # Sandbox lifecycle
-    # ------------------------------------------------------------------ #
 
     async def _precache_image(self) -> None:
         """Ensure the OCI image is cached locally before any VM boot.
@@ -350,7 +348,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
 
             return sb
 
-    # -- low-level VM helpers (thin wrappers over sb.shell) ------------ #
+    # low-level VM helpers (thin wrappers over sb.shell)
 
     @staticmethod
     def _format_output(result) -> str:
@@ -466,9 +464,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         self._sandbox = None
         await self._destroy_sandbox(self._sandbox_id)
 
-    # ------------------------------------------------------------------ #
     # Properties
-    # ------------------------------------------------------------------ #
 
     @property
     def id(self) -> str:
@@ -506,9 +502,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         """Env dict that activates :attr:`venv_bin`, or ``None`` if no venv."""
         return self._venv_env
 
-    # ------------------------------------------------------------------ #
     # Command execution
-    # ------------------------------------------------------------------ #
 
     def _is_sandbox_dead_output(self, output: str) -> bool:
         """Detect microsandbox socket/agent death from command output."""
@@ -600,9 +594,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         """Execute a shell command (sync wrapper)."""
         return _run_async(self.aexecute(command, timeout=timeout))
 
-    # ------------------------------------------------------------------ #
     # File read
-    # ------------------------------------------------------------------ #
 
     async def aread(
         self,
@@ -661,9 +653,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         """Read file content (sync wrapper)."""
         return _run_async(self.aread(file_path, offset=offset, limit=limit))
 
-    # ------------------------------------------------------------------ #
     # File write
-    # ------------------------------------------------------------------ #
 
     async def awrite(
         self,
@@ -709,9 +699,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         """Create a new file (sync wrapper)."""
         return _run_async(self.awrite(file_path, content))
 
-    # ------------------------------------------------------------------ #
     # File edit
-    # ------------------------------------------------------------------ #
 
     async def aedit(
         self,
@@ -776,9 +764,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
             self.aedit(file_path, old_string, new_string, replace_all=replace_all)
         )
 
-    # ------------------------------------------------------------------ #
     # Directory listing
-    # ------------------------------------------------------------------ #
 
     async def als(self, path: str) -> LsResult:
         """List directory contents with metadata."""
@@ -805,9 +791,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         """List directory contents (sync wrapper)."""
         return _run_async(self.als(path))
 
-    # ------------------------------------------------------------------ #
     # Grep
-    # ------------------------------------------------------------------ #
 
     async def agrep(
         self,
@@ -862,9 +846,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         """Search for a literal string (sync wrapper)."""
         return _run_async(self.agrep(pattern, path=path, glob=glob))
 
-    # ------------------------------------------------------------------ #
     # Glob
-    # ------------------------------------------------------------------ #
 
     async def aglob(self, pattern: str, path: str | None = None) -> GlobResult:
         """Find files matching a glob pattern using ``find``."""
@@ -903,9 +885,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         """Find files matching a glob pattern (sync wrapper)."""
         return _run_async(self.aglob(pattern, path=path))
 
-    # ------------------------------------------------------------------ #
     # File upload / download
-    # ------------------------------------------------------------------ #
 
     async def aupload_files(
         self, files: list[tuple[str, bytes]]
@@ -973,9 +953,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         """Download files (sync wrapper)."""
         return _run_async(self.adownload_files(paths))
 
-    # ------------------------------------------------------------------ #
     # Path helpers
-    # ------------------------------------------------------------------ #
 
     def _to_guest_path(self, input: str) -> str:
         """Replace root_dir with /workspace."""

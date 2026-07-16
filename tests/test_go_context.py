@@ -208,9 +208,7 @@ class TestFindSymbol:
             )
 
 
-# ---------------------------------------------------------------------------
 # goto_definition
-# ---------------------------------------------------------------------------
 #
 # This is the critical regression suite.  Each test resolves a specific
 # call site in orders.go and asserts the EXACT location/kind/signature that
@@ -237,7 +235,6 @@ class TestFindSymbol:
 # the variable declaration, or the receiver type — NOT the target symbol.
 # Every test below fails when that bug is present and passes once the
 # column computation is fixed to point at the member.
-# ---------------------------------------------------------------------------
 
 
 class TestGotoDefinition:
@@ -250,13 +247,13 @@ class TestGotoDefinition:
         40:  return strings.ToUpper(o.Process())
     """
 
-    # ---- helpers ---------------------------------------------------------
+    # helpers
 
     @staticmethod
     def _basename(path: str) -> str:
         return path.replace("\\", "/").rstrip("/").split("/")[-1]
 
-    # ---- stdlib qualified call: strings.ToUpper --------------------------
+    # stdlib qualified call: strings.ToUpper
 
     def test_resolves_qualified_stdlib_call(self, tools):
         """strings.ToUpper (orders.go:40) must resolve to the stdlib function,
@@ -300,7 +297,7 @@ class TestGotoDefinition:
             "not the member"
         )
 
-    # ---- concrete method call: o.Process ---------------------------------
+    # concrete method call: o.Process
 
     def test_resolves_method_call_on_receiver(self, tools):
         """o.Process (orders.go:40) must resolve to the method definition,
@@ -339,7 +336,7 @@ class TestGotoDefinition:
             "(column points at the receiver, not the member)"
         )
 
-    # ---- plain function call: ValidateAddress ----------------------------
+    # plain function call: ValidateAddress
 
     def test_resolves_plain_function_call(self, tools):
         """ValidateAddress (orders.go:26) must resolve to validation.go.
@@ -360,7 +357,7 @@ class TestGotoDefinition:
             f"expected kind 'function', got {result['kind']!r}"
         )
 
-    # ---- plain function call: FormatCurrency -----------------------------
+    # plain function call: FormatCurrency
 
     def test_resolves_plain_function_call_other_file(self, tools):
         """FormatCurrency (orders.go:29) must resolve to utils.go.
@@ -381,7 +378,7 @@ class TestGotoDefinition:
             f"expected kind 'function', got {result['kind']!r}"
         )
 
-    # ---- struct field access: o.Address ----------------------------------
+    # struct field access: o.Address
 
     def test_resolves_struct_field_access(self, tools):
         """o.Address (orders.go:26) must resolve to the struct field,
@@ -411,7 +408,7 @@ class TestGotoDefinition:
             "(column points at the receiver, not the member)"
         )
 
-    # ---- struct field access: o.Amount -----------------------------------
+    # struct field access: o.Amount
 
     def test_resolves_struct_field_access_amount(self, tools):
         """o.Amount (orders.go:29) must resolve to the struct field.
@@ -435,7 +432,7 @@ class TestGotoDefinition:
             "(column points at the receiver, not the member)"
         )
 
-    # ---- interface method call: p.Process --------------------------------
+    # interface method call: p.Process
     #
     # processor.go defines UseProcessor(p Processor) which calls p.Process().
     # gopls ground truth at the member column (col 11, the 'P' of Process):
@@ -478,7 +475,7 @@ class TestGotoDefinition:
             "(column points at the receiver, not the member)"
         )
 
-    # ---- same-line disambiguation ----------------------------------------
+    # same-line disambiguation
     #
     # orders.go:40 has TWO selectors on the same line:
     #     return strings.ToUpper(o.Process())
@@ -502,7 +499,7 @@ class TestGotoDefinition:
         )
         assert result["line"] == 25, f"expected line 25, got {result['line']}"
 
-    # ---- result shape ----------------------------------------------------
+    # result shape
 
     def test_result_has_required_fields(self, tools):
         """Every result must include name, kind, file, line, col, signature."""

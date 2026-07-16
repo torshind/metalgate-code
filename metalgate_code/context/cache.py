@@ -48,9 +48,7 @@ class CodeCache:
         self._local = threading.local()
         self._execute_script(_SCHEMA)
 
-    # ------------------------------------------------------------------ #
     # connection management
-    # ------------------------------------------------------------------ #
 
     def _conn(self) -> sqlite3.Connection:
         if not hasattr(self._local, "conn"):
@@ -63,9 +61,7 @@ class CodeCache:
         conn.executescript(sql)
         conn.commit()
 
-    # ------------------------------------------------------------------ #
     # outline cache
-    # ------------------------------------------------------------------ #
 
     def get_outline(self, file: str) -> Optional[list[dict]]:
         current_mtime = _mtime(file)
@@ -85,9 +81,7 @@ class CodeCache:
         )
         self._conn().commit()
 
-    # ------------------------------------------------------------------ #
     # definition cache
-    # ------------------------------------------------------------------ #
 
     def get_definition(self, file: str, line: int, name: str) -> Optional[Any]:
         """Returns cached result (may be None if we cached a miss)."""
