@@ -1,5 +1,7 @@
 package main
 
+import "strings"
+
 // Order represents a customer order.
 type Order struct {
 	Address string
@@ -31,6 +33,11 @@ func (o *Order) Process() string {
 // Apply applies a callback to the order. 日本語コメントでマルチバイトテスト。
 func (o *Order) Apply(fn func(*Order)) {
 	fn(o)
+}
+
+// ProcessAndUpper processes the order and uppercases the result.
+func ProcessAndUpper(o *Order) string {
+	return strings.ToUpper(o.Process())
 }
 
 // UnusedFunc is never called by anyone.

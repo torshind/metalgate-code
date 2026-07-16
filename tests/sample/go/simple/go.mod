@@ -1,4 +1,4 @@
-module go.example.dev
+module example.com/testproject
 
 go 1.26.5
 

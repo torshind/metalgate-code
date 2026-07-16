@@ -1,12 +1,15 @@
-"""Integration tests for contextual symbol search tools."""
+"""Unit tests for contextual symbol search tools.
 
-import os
-import shutil
+These tests use ``LocalShellBackend`` and run on the host without a
+sandbox.  Sandbox/agent integration tests live in
+``test_python_context_integration.py``.
+"""
+
 import tempfile
 from pathlib import Path
 
 import pytest
-from acp.schema import ToolCallStart
+from deepagents.backends import LocalShellBackend
 
 from metalgate_code.context import get_code_tools
 from metalgate_code.context.python_tracer import (
@@ -14,17 +17,18 @@ from metalgate_code.context.python_tracer import (
     _name_col_on_line,
     _parse_hover,
     _ts_call_positions,
+    _ts_find_function_and_calls,
     _ts_find_function_containing,
     _ts_find_scope_at_line,
+    _ts_is_stub_function,
     _uri_to_path,
 )
-from metalgate_code.factory import MicrosandboxBackend
-from tests.conftest import RecordingClient, run_agent
 
 SAMPLE_DIR = Path(__file__).parent / "sample" / "python"
 ORDERS_FILE = str(SAMPLE_DIR / "orders.py")
 VALIDATION_FILE = str(SAMPLE_DIR / "validation.py")
 UTILS_FILE = str(SAMPLE_DIR / "utils.py")
+EDGE_FILE = str(SAMPLE_DIR / "edge_cases.py")
 
 
 @pytest.fixture(scope="module")
@@ -32,10 +36,9 @@ def tools():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
 
-    shell_env = os.environ.copy()
-    shell_backend = MicrosandboxBackend(
+    shell_backend = LocalShellBackend(
         root_dir=str(SAMPLE_DIR),
-        env=shell_env,
+        virtual_mode=False,
         inherit_env=True,
     )
 
@@ -61,7 +64,6 @@ def tools():
         "get_callees": callees,
         "find_symbol": find_sym,
     }
-    os.unlink(db_path)
 
 
 # get_file_outline
@@ -299,7 +301,7 @@ class TestFindSymbol:
 
 
 class TestUriToPathPercentDecoding:
-    """Reproduces #3: _uri_to_path didn't decode percent-encoded URIs."""
+    """Verify _uri_to_path decodes percent-encoded URIs."""
 
     def test_decodes_percent_encoded_spaces(self):
         assert _uri_to_path("file:///foo%20bar/baz.py") == "/foo bar/baz.py"
@@ -315,7 +317,7 @@ class TestUriToPathPercentDecoding:
 
 
 class TestNameColOnLineMultipleOccurrences:
-    """Reproduces #6: _name_col_on_line returned only the first occurrence."""
+    """Verify _name_col_on_line resolves multiple occurrences on the same line."""
 
     def test_first_occurrence_by_default(self):
         line = "result = foo(foo)"
@@ -347,13 +349,10 @@ class TestNameColOnLineMultipleOccurrences:
 
 
 class TestCallPositionsFalsePositives:
-    """Reproduces #16: _call_positions matched decorators and class definitions.
+    """Verify _ts_call_positions excludes decorators and class definitions.
 
-    Now uses _ts_call_positions (tree-sitter AST-based).  The old
-    tokenize-based _call_positions was replaced because it relied on
-    manual heuristics to skip decorators/class-defs/def-line; the
-    tree-sitter version naturally excludes them because they are not
-    ``call`` nodes within the function body.
+    Tree-sitter naturally excludes them because they are not ``call`` nodes
+    within the function body.
     """
 
     def test_skips_decorator_lines(self):
@@ -383,7 +382,7 @@ class TestCallPositionsFalsePositives:
 
 
 class TestParseHoverFragility:
-    """Reproduces #14: hover parsing assumed first line is always signature."""
+    """Verify _parse_hover handles all LSP contents shapes."""
 
     def test_plain_signature_and_docstring(self):
         hover = {"contents": {"value": "def foo(x: int) -> bool\nDoes a thing."}}
@@ -417,7 +416,7 @@ class TestParseHoverFragility:
 
 
 class TestLspSymbolKindMapping:
-    """Reproduces #4: find_symbol mapped all non-class kinds to 'function'."""
+    """Verify _lsp_symbol_kind_to_str maps LSP SymbolKind numbers correctly."""
 
     def test_class(self):
         assert _lsp_symbol_kind_to_str(5) == "class"
@@ -439,7 +438,7 @@ class TestLspSymbolKindMapping:
 
 
 class TestTsFindScopeAtLine:
-    """Verify line-base convention fix (#11)."""
+    """Verify _ts_find_scope_at_line returns sliceable line indices."""
 
     def test_returns_sliceable_indices(self):
         source = "def foo():\n    pass\n\ndef bar():\n    return 1\n"
@@ -458,7 +457,7 @@ class TestTsFindScopeAtLine:
 
 
 class TestTsFindFunctionContaining:
-    """Verify line-base convention fix (#11)."""
+    """Verify _ts_find_function_containing finds the innermost function."""
 
     def test_finds_innermost_function(self):
         source = "def outer():\n    def inner():\n        pass\n    pass\n"
@@ -475,46 +474,245 @@ class TestTsFindFunctionContaining:
         assert result is None
 
 
-# Agent workflow — validates the agent actually uses all context tools
-@pytest.mark.asyncio
-async def test_agent_uses_context_tools(run_sh: Path) -> None:
-    """Ensure the agent can use every context tool to analyze source code."""
-    client = RecordingClient(prefix="acp_python_context_test_")
-    with client:
-        src = Path(__file__).parent / "sample" / "python"
-        dst = client.temp_dir / "sample_python"
-        shutil.copytree(src, dst, symlinks=True)
+# --------------------------------------------------------------------------- #
+# Edge case integration tests (require sandbox/LSP via `tools` fixture)
+# --------------------------------------------------------------------------- #
 
-        await run_agent(
-            client,
-            run_sh,
-            f"""
-            In the directory {dst}, there is a Python project with orders.py, validation.py, and utils.py.
-            I need you to do a full cross-reference analysis of the function 'validate_address':
-            1. Use find_symbol to locate 'validate_address'.
-            2. Use get_file_outline on validation.py to see all symbols in that file.
-            3. Use goto_definition from orders.py to find where validate_address is defined.
-            4. Use get_source to read the full source code of validate_address.
-            5. Use get_callers on validate_address to see who calls it.
-            6. Use get_callees on the process method in orders.py to see what it calls.
-            Report back what validate_address does, what constant it references, and who calls it.
-            """,
-        )
 
-        called_tools = {
-            update.title
-            for update in client.updates
-            if isinstance(update, ToolCallStart)
-        }
-        required = {
-            "find_symbol",
-            "get_file_outline",
-            "goto_definition",
-            "get_source",
-            "get_callers",
-            "get_callees",
-        }
-        missing = required - called_tools
-        assert not missing, (
-            f"Agent did not call these context tools: {missing}. Called: {called_tools}"
-        )
+class TestEdgeCasesOutline:
+    """get_file_outline on edge_cases.py — decorators, async, nested, stubs."""
+
+    def test_finds_decorated_function(self, tools):
+        symbols = tools["get_file_outline"](EDGE_FILE)
+        names = [s["name"] for s in symbols]
+        assert "cached_function" in names
+
+    def test_decorated_function_line_is_def_not_decorator(self, tools):
+        symbols = tools["get_file_outline"](EDGE_FILE)
+        cached = next(s for s in symbols if s["name"] == "cached_function")
+        # Line 13 is the `def` line; line 12 is `@functools.lru_cache`
+        assert cached["line"] == 13
+
+    def test_finds_async_function(self, tools):
+        symbols = tools["get_file_outline"](EDGE_FILE)
+        names = [s["name"] for s in symbols]
+        assert "async_with_nested" in names
+
+    def test_async_signature_has_async_prefix(self, tools):
+        symbols = tools["get_file_outline"](EDGE_FILE)
+        async_fn = next(s for s in symbols if s["name"] == "async_with_nested")
+        assert async_fn["signature"].startswith("async def ")
+
+    def test_finds_class_with_methods(self, tools):
+        symbols = tools["get_file_outline"](EDGE_FILE)
+        cls = next(s for s in symbols if s["name"] == "EdgeClass")
+        assert cls["kind"] == "class"
+
+    def test_property_is_method(self, tools):
+        symbols = tools["get_file_outline"](EDGE_FILE)
+        value = next(s for s in symbols if s["name"] == "value")
+        assert value["kind"] == "method"
+        assert value["class"] == "EdgeClass"
+
+    def test_classmethod_is_method(self, tools):
+        symbols = tools["get_file_outline"](EDGE_FILE)
+        gc = next(s for s in symbols if s["name"] == "get_count")
+        assert gc["kind"] == "method"
+
+    def test_staticmethod_is_method(self, tools):
+        symbols = tools["get_file_outline"](EDGE_FILE)
+        sh = next(s for s in symbols if s["name"] == "static_helper")
+        assert sh["kind"] == "method"
+
+    def test_async_method_has_async_prefix(self, tools):
+        symbols = tools["get_file_outline"](EDGE_FILE)
+        am = next(s for s in symbols if s["name"] == "async_method")
+        assert am["signature"].startswith("async def ")
+
+    def test_nested_function_not_in_outline(self, tools):
+        """process_result is nested inside async_with_nested — should not
+        appear as a top-level outline entry."""
+        symbols = tools["get_file_outline"](EDGE_FILE)
+        names = [s["name"] for s in symbols]
+        assert "process_result" not in names
+
+
+class TestEdgeCasesGetSource:
+    """get_source on edge_cases.py — async, nested, class."""
+
+    def test_async_function_source(self, tools):
+        symbols = tools["get_file_outline"](EDGE_FILE)
+        line = next(s for s in symbols if s["name"] == "async_with_nested")["line"]
+        result = tools["get_source"](EDGE_FILE, line)
+        assert "async def async_with_nested" in result["source"]
+        assert "process_result" in result["source"]
+        assert result["fallback"] is False
+
+    def test_class_source_includes_methods(self, tools):
+        symbols = tools["get_file_outline"](EDGE_FILE)
+        line = next(s for s in symbols if s["name"] == "EdgeClass")["line"]
+        result = tools["get_source"](EDGE_FILE, line)
+        assert "class EdgeClass" in result["source"]
+        assert "__init__" in result["source"]
+        assert "async_method" in result["source"]
+
+    def test_decorated_function_source(self, tools):
+        symbols = tools["get_file_outline"](EDGE_FILE)
+        line = next(s for s in symbols if s["name"] == "cached_function")["line"]
+        result = tools["get_source"](EDGE_FILE, line)
+        assert "def cached_function" in result["source"]
+        assert "return x * 2" in result["source"]
+
+
+class TestEdgeCasesGotoDefinition:
+    """goto_definition on edge_cases.py — same-file and nested."""
+
+    def test_resolves_fetch_inside_async(self, tools):
+        # Line 21: result = await fetch(url)
+        result = tools["goto_definition"](EDGE_FILE, 21, "fetch")
+        assert result
+        assert result["name"] == "fetch"
+        assert "edge_cases.py" in result["file"]
+
+    def test_resolves_nested_function_call(self, tools):
+        # Line 27: return {"processed": process_result(result)}
+        result = tools["goto_definition"](EDGE_FILE, 27, "process_result")
+        assert result
+        assert result["name"] == "process_result"
+
+
+class TestEdgeCasesGetCallees:
+    """get_callees on edge_cases.py — stdlib filtering, nested calls."""
+
+    def test_pure_function_has_no_callees(self, tools):
+        symbols = tools["get_file_outline"](EDGE_FILE)
+        line = next(s for s in symbols if s["name"] == "pure_function")["line"]
+        callees = tools["get_callees"](EDGE_FILE, line)
+        assert callees == []
+
+    def test_stdlib_only_has_no_callees(self, tools):
+        """len() is stdlib — should be filtered out."""
+        symbols = tools["get_file_outline"](EDGE_FILE)
+        line = next(s for s in symbols if s["name"] == "stdlib_only")["line"]
+        callees = tools["get_callees"](EDGE_FILE, line)
+        assert callees == []
+
+    def test_async_function_finds_fetch(self, tools):
+        symbols = tools["get_file_outline"](EDGE_FILE)
+        line = next(s for s in symbols if s["name"] == "async_with_nested")["line"]
+        callees = tools["get_callees"](EDGE_FILE, line)
+        names = [c["name"] for c in callees]
+        assert "fetch" in names
+
+    def test_async_method_finds_class_methods(self, tools):
+        symbols = tools["get_file_outline"](EDGE_FILE)
+        line = next(s for s in symbols if s["name"] == "async_method")["line"]
+        callees = tools["get_callees"](EDGE_FILE, line)
+        names = [c["name"] for c in callees]
+        assert "get_count" in names
+        assert "static_helper" in names
+
+
+class TestEdgeCasesGetCallers:
+    """get_callers on edge_cases.py — finds call sites within the file."""
+
+    def test_fetch_caller_is_async_with_nested(self, tools):
+        symbols = tools["get_file_outline"](EDGE_FILE)
+        line = next(s for s in symbols if s["name"] == "fetch")["line"]
+        callers = tools["get_callers"](EDGE_FILE, line)
+        caller_names = [c["caller"] for c in callers]
+        assert "async_with_nested" in caller_names
+
+
+# --------------------------------------------------------------------------- #
+# Unit tests for edge-case helper functions (no sandbox/LSP required)
+# --------------------------------------------------------------------------- #
+
+
+class TestTsIsStubFunction:
+    """Verify _ts_is_stub_function detects all stub patterns."""
+
+    def test_raise_notimplemented_is_stub(self):
+        source = "def foo(x):\n    raise NotImplementedError\n"
+        assert _ts_is_stub_function(source.encode("utf-8"), 1) is True
+
+    def test_pass_is_stub(self):
+        source = "def foo(x):\n    pass\n"
+        assert _ts_is_stub_function(source.encode("utf-8"), 1) is True
+
+    def test_ellipsis_is_stub(self):
+        source = "def foo(x):\n    ...\n"
+        assert _ts_is_stub_function(source.encode("utf-8"), 1) is True
+
+    def test_docstring_then_ellipsis_is_stub(self):
+        source = 'def foo(x):\n    """Doc."""\n    ...\n'
+        assert _ts_is_stub_function(source.encode("utf-8"), 1) is True
+
+    def test_docstring_then_pass_is_stub(self):
+        source = 'def foo(x):\n    """Doc."""\n    pass\n'
+        assert _ts_is_stub_function(source.encode("utf-8"), 1) is True
+
+    def test_concrete_return_is_not_stub(self):
+        source = "def foo(x):\n    return x + 1\n"
+        assert _ts_is_stub_function(source.encode("utf-8"), 1) is False
+
+    def test_concrete_assignment_is_not_stub(self):
+        source = "def foo(x):\n    y = x + 1\n    return y\n"
+        assert _ts_is_stub_function(source.encode("utf-8"), 1) is False
+
+    def test_other_raise_is_not_stub(self):
+        source = "def foo(x):\n    raise ValueError('nope')\n"
+        assert _ts_is_stub_function(source.encode("utf-8"), 1) is False
+
+    def test_no_function_at_line_returns_false(self):
+        source = "x = 1\n"
+        assert _ts_is_stub_function(source.encode("utf-8"), 1) is False
+
+
+class TestTsFindFunctionAndCalls:
+    """Verify _ts_find_function_and_calls finds functions and their call
+    positions in a single tree walk."""
+
+    def test_finds_function_and_calls(self):
+        source = "def foo():\n    bar()\n    baz()\n"
+        result = _ts_find_function_and_calls(source.encode("utf-8"), 1)
+        assert result is not None
+        start, end, name, positions = result
+        assert start == 1
+        assert end == 3
+        assert name == "foo"
+        assert len(positions) == 2
+
+    def test_finds_innermost_function(self):
+        source = "def outer():\n    def inner():\n        bar()\n    pass\n"
+        # Line 3 is inside `inner`
+        result = _ts_find_function_and_calls(source.encode("utf-8"), 3)
+        assert result is not None
+        start, end, name, positions = result
+        assert name == "inner"
+        assert len(positions) == 1
+
+    def test_returns_none_outside_function(self):
+        source = "x = 1\ndef foo():\n    pass\n"
+        result = _ts_find_function_and_calls(source.encode("utf-8"), 1)
+        assert result is None
+
+    def test_no_calls_returns_empty_positions(self):
+        source = "def foo():\n    return 1\n"
+        result = _ts_find_function_and_calls(source.encode("utf-8"), 1)
+        assert result is not None
+        start, end, name, positions = result
+        assert positions == []
+
+    def test_attribute_call_targets_method_name(self):
+        """For obj.method(), the call position should target the method
+        name, not the object."""
+        source = "def foo():\n    obj.method()\n"
+        result = _ts_find_function_and_calls(source.encode("utf-8"), 1)
+        assert result is not None
+        _, _, _, positions = result
+        assert len(positions) == 1
+        line, col = positions[0]
+        line_text = source.splitlines()[line - 1]
+        # col should point at "method", not "obj"
+        assert line_text[col:].startswith("method")

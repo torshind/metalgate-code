@@ -1,20 +1,23 @@
-"""Unit tests for Go contextual symbol search tools in a monorepo layout.
+"""Sandbox integration tests for Go contextual symbol search tools in a
+monorepo layout.
 
-This mirrors the structure of go.evroc.dev: a single module with nested packages
-under private/, public/, and e2e-tests/.
-
-These tests use ``LocalShellBackend`` and run on the host without a
-sandbox.  Sandbox/agent integration tests live in
-``test_go_context_integration.py``.
+These tests run against a real microsandbox VM and the end-to-end agent
+workflow.  They are intentionally kept separate from the unit tests in
+``test_go_context_monorepo.py`` (which use ``LocalShellBackend`` and need
+no sandbox).
 """
 
+import os
+import shutil
 import tempfile
 from pathlib import Path
 
 import pytest
-from deepagents.backends import LocalShellBackend
+from acp.schema import ToolCallStart
 
 from metalgate_code.context import get_code_tools
+from metalgate_code.factory import MicrosandboxBackend
+from tests.conftest import RecordingClient, run_agent
 
 MONOREPO_DIR = Path(__file__).parent / "sample" / "go" / "monorepo"
 SHARED_FILE = str(
@@ -31,15 +34,19 @@ CLOSURE_FILE = str(MONOREPO_DIR / "private" / "service" / "api" / "closure.go")
 CLIENT_FILE = str(MONOREPO_DIR / "public" / "client" / "client.go")
 E2E_FILE = str(MONOREPO_DIR / "e2e-tests" / "suite" / "test.go")
 
+_HAS_GOPLS = shutil.which("gopls") is not None
+
 
 @pytest.fixture(scope="module")
 def tools():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
 
-    shell_backend = LocalShellBackend(
+    shell_env = os.environ.copy()
+    shell_backend = MicrosandboxBackend(
         root_dir=str(MONOREPO_DIR),
-        virtual_mode=False,
+        image="golang",
+        env=shell_env,
         inherit_env=True,
     )
 
@@ -66,110 +73,140 @@ def tools():
         "get_callees": callees,
         "find_symbol": find_sym,
     }
+    os.unlink(db_path)
 
 
-# get_file_outline
-class TestGetFileOutline:
-    def test_finds_struct(self, tools):
-        symbols = tools["get_file_outline"](CONTROLLER_FILE)
-        assert any(s["name"] == "Controller" and s["kind"] == "struct" for s in symbols)
+# goto_definition — requires gopls inside the sandbox
+@pytest.mark.skipif(not _HAS_GOPLS, reason="gopls not installed")
+class TestGotoDefinition:
+    def _find_call_line(self, file, name):
+        source = Path(file).read_text()
+        for i, line in enumerate(source.splitlines(), 1):
+            if name in line and "(" in line and not line.lstrip().startswith("//"):
+                return i
+        return 1
 
-    def test_finds_function(self, tools):
-        symbols = tools["get_file_outline"](CONTROLLER_FILE)
-        assert any(
-            s["name"] == "NewController" and s["kind"] == "function" for s in symbols
+    def test_resolves_cross_package_function(self, tools):
+        line = self._find_call_line(CONTROLLER_FILE, "shared.ToContext")
+        result = tools["goto_definition"](CONTROLLER_FILE, line, "shared.ToContext")
+        assert result
+        assert "context.go" in result["file"]
+        assert result["name"] == "ToContext"
+
+    def test_resolves_cross_package_function_from_client(self, tools):
+        line = self._find_call_line(CLIENT_FILE, "api.NewController")
+        result = tools["goto_definition"](CLIENT_FILE, line, "api.NewController")
+        assert result
+        assert "controller.go" in result["file"]
+        assert result["name"] == "NewController"
+
+    def test_resolves_cross_package_method_from_client(self, tools):
+        line = self._find_call_line(CLIENT_FILE, "c.ctrl.Publish")
+        result = tools["goto_definition"](CLIENT_FILE, line, "c.ctrl.Publish")
+        assert result
+        assert "controller.go" in result["file"]
+        assert result["name"] == "Publish"
+
+    def test_returns_empty_dict_on_unknown_symbol(self, tools):
+        result = tools["goto_definition"](CONTROLLER_FILE, 1, "zzz_nonexistent")
+        assert result == {}
+
+    def test_result_has_required_keys(self, tools):
+        line = self._find_call_line(CONTROLLER_FILE, "shared.ToContext")
+        result = tools["goto_definition"](CONTROLLER_FILE, line, "shared.ToContext")
+        for key in ("name", "kind", "file", "line", "signature"):
+            assert key in result
+
+    def test_cache_is_stable(self, tools):
+        line = self._find_call_line(CONTROLLER_FILE, "shared.ToContext")
+        r1 = tools["goto_definition"](CONTROLLER_FILE, line, "shared.ToContext")
+        r2 = tools["goto_definition"](CONTROLLER_FILE, line, "shared.ToContext")
+        assert r1 == r2
+
+    # --- Selector resolution (Bug 1 & 2) ---
+
+    def test_resolves_qualified_stdlib_call(self, tools):
+        """goto_definition on a qualified stdlib call like fmt.Sprintf
+        should resolve to the stdlib function, not the import line."""
+        line = self._find_call_line(SHARED_FILE, "fmt.Sprintf")
+        result = tools["goto_definition"](SHARED_FILE, line, "fmt.Sprintf")
+        assert result
+        # Must point into the Go stdlib, not the local import line.
+        assert "context.go" not in result["file"]
+        assert result["kind"] != "unknown"
+
+    def test_resolves_method_call_on_receiver(self, tools):
+        """goto_definition on a method call like c.Publish should
+        resolve to the method definition, not the receiver variable."""
+        line = self._find_call_line(MIDDLEWARE_FILE, "c.Publish")
+        result = tools["goto_definition"](MIDDLEWARE_FILE, line, "c.Publish")
+        assert result
+        assert "controller.go" in result["file"]
+        # Should point at the Publish method definition, not a var decl.
+        assert result["kind"] == "method"
+        assert result["line"] != line  # not the call site itself
+
+    def test_resolves_shared_to_context_cross_package(self, tools):
+        """goto_definition on shared.ToContext should resolve to the
+        shared package function, not the import line."""
+        line = self._find_call_line(CONTROLLER_FILE, "shared.ToContext")
+        result = tools["goto_definition"](CONTROLLER_FILE, line, "shared.ToContext")
+        assert result
+        assert "controller.go" not in result["file"]
+        assert result["kind"] != "unknown"
+
+
+# Path translation — host paths must be translated to sandbox paths
+#
+# When the agent runs with a MicrosandboxBackend, the agent passes host
+# paths (e.g. /Users/foo/project/controller.go) but gopls runs inside the
+# sandbox and only knows /workspace/... paths.  The tracer must translate
+# host paths to sandbox paths before sending URIs to gopls, and translate
+# gopls response URIs back to host paths.
+@pytest.mark.skipif(not _HAS_GOPLS, reason="gopls not installed")
+class TestPathTranslation:
+    """The tracer must translate host paths to sandbox paths and back."""
+
+    @staticmethod
+    def _basename(path: str) -> str:
+        return path.replace("\\", "/").rstrip("/").split("/")[-1]
+
+    def test_host_path_resolves_cross_package_selector(self, tools):
+        """A selector call (shared.ToContext) given with the host path must
+        resolve correctly — the tracer translates the host path to the
+        sandbox path before sending it to gopls."""
+        line = 17  # return shared.ToContext(key, val)
+        result = tools["goto_definition"](CONTROLLER_FILE, line, "shared.ToContext")
+        assert result, "got empty result with host path"
+        assert self._basename(result["file"]) == "context.go"
+
+    def test_host_path_resolves_cross_package_function(self, tools):
+        """A cross-package function call (api.NewController) given with the
+        host path must resolve to controller.go."""
+        line = 14  # return &Client{ctrl: api.NewController()}
+        result = tools["goto_definition"](CLIENT_FILE, line, "api.NewController")
+        assert result, "got empty result with host path"
+        assert self._basename(result["file"]) == "controller.go"
+
+    def test_host_path_resolves_same_package_method(self, tools):
+        """A same-package method call (c.Publish) given with the host path
+        must resolve to the method definition, not the parameter
+        declaration."""
+        line = 8  # return c.Publish("middleware", 1)
+        result = tools["goto_definition"](MIDDLEWARE_FILE, line, "c.Publish")
+        assert result, "got empty result with host path"
+        assert self._basename(result["file"]) == "controller.go"
+        assert result["kind"] == "method"
+
+    def test_result_file_is_sandbox_path(self, tools):
+        """The result's file field must be a sandbox path (containing
+        /workspace), since the agent works with sandbox paths."""
+        line = 17
+        result = tools["goto_definition"](CONTROLLER_FILE, line, "shared.ToContext")
+        assert result
+        assert result["file"].startswith("/workspace/"), (
+            f"result file is not a sandbox path: {result['file']!r}"
         )
-
-    def test_finds_method(self, tools):
-        symbols = tools["get_file_outline"](CONTROLLER_FILE)
-        method = next(
-            (s for s in symbols if s["name"] == "Publish" and s["kind"] == "method"),
-            None,
-        )
-        assert method is not None
-
-    def test_method_has_receiver(self, tools):
-        symbols = tools["get_file_outline"](CONTROLLER_FILE)
-        publish = next(s for s in symbols if s["name"] == "Publish")
-        assert "Controller" in (publish.get("class") or "")
-
-    def test_finds_function_in_shared(self, tools):
-        symbols = tools["get_file_outline"](SHARED_FILE)
-        assert any(
-            s["name"] == "ToContext" and s["kind"] == "function" for s in symbols
-        )
-        assert any(
-            s["name"] == "FromContext" and s["kind"] == "function" for s in symbols
-        )
-
-    def test_cached_result_is_identical(self, tools):
-        first = tools["get_file_outline"](CONTROLLER_FILE)
-        second = tools["get_file_outline"](CONTROLLER_FILE)
-        assert first == second
-
-
-# get_source
-class TestGetSource:
-    def _publish_line(self, tools):
-        symbols = tools["get_file_outline"](CONTROLLER_FILE)
-        return next(s for s in symbols if s["name"] == "Publish")["line"]
-
-    def test_source_contains_func(self, tools):
-        line = self._publish_line(tools)
-        result = tools["get_source"](CONTROLLER_FILE, line)
-        assert "Publish" in result["source"]
-        assert "shared.ToContext" in result["source"]
-
-    def test_start_and_end_lines_are_sane(self, tools):
-        line = self._publish_line(tools)
-        result = tools["get_source"](CONTROLLER_FILE, line)
-        assert result["start_line"] >= 1
-        assert result["end_line"] >= result["start_line"]
-
-    def test_get_source_from_body_line(self, tools):
-        symbols = tools["get_file_outline"](CONTROLLER_FILE)
-        publish = next(s for s in symbols if s["name"] == "Publish")
-        body_line = publish["line"] + 2
-        result = tools["get_source"](CONTROLLER_FILE, body_line)
-        assert "Publish" in result["source"]
-
-    def test_get_source_cross_package(self, tools):
-        symbols = tools["get_file_outline"](SHARED_FILE)
-        tc = next(s for s in symbols if s["name"] == "ToContext")
-        result = tools["get_source"](SHARED_FILE, tc["line"])
-        assert "ToContext" in result["source"]
-
-
-# find_symbol
-class TestFindSymbol:
-    def test_exact_match_finds_to_context(self, tools):
-        results = tools["find_symbol"]("ToContext")
-        names = [r["name"] for r in results]
-        assert "ToContext" in names
-
-    def test_exact_match_finds_from_context(self, tools):
-        results = tools["find_symbol"]("FromContext")
-        names = [r["name"] for r in results]
-        assert "FromContext" in names
-
-    def test_finds_struct_by_name(self, tools):
-        results = tools["find_symbol"]("Controller")
-        names = [r["name"] for r in results]
-        assert "Controller" in names
-
-    def test_finds_function_cross_package(self, tools):
-        results = tools["find_symbol"]("NewController")
-        names = [r["name"] for r in results]
-        assert "NewController" in names
-
-    def test_unknown_symbol_returns_empty_list(self, tools):
-        results = tools["find_symbol"]("zzz_does_not_exist_xyz")
-        assert results == []
-
-    def test_cached_result_is_identical(self, tools):
-        first = tools["find_symbol"]("ToContext")
-        second = tools["find_symbol"]("ToContext")
-        assert first == second
 
 
 # goto_definition — cross-package resolution
@@ -188,6 +225,7 @@ class TestFindSymbol:
 #
 # All ground-truth locations were captured from gopls v0.23.0 at the correct
 # member column of each call site.
+@pytest.mark.skipif(not _HAS_GOPLS, reason="gopls not installed")
 class TestGotoDefinitionCrossPackage:
     """Resolves symbols defined in a different package/directory of the
     monorepo.
@@ -381,6 +419,7 @@ class TestGotoDefinitionCrossPackage:
 #     line 16: func (c *Controller) Publish(key string, val int) map[string]string
 #     line 21: func (c *Controller) Lookup(ctx map[string]string, key string) (string, error)
 # ---------------------------------------------------------------------------
+@pytest.mark.skipif(not _HAS_GOPLS, reason="gopls not installed")
 class TestGotoDefinitionSamePackage:
     """Resolves method calls within the same package but a different file.
 
@@ -507,6 +546,7 @@ class TestGotoDefinitionSamePackage:
 #     line 10: 	Render(dest string) error          (interface method)
 #     line 12: 	WriteContentType() string          (interface method)
 # ---------------------------------------------------------------------------
+@pytest.mark.skipif(not _HAS_GOPLS, reason="gopls not installed")
 class TestGotoDefinitionInterfaceMethod:
     """Resolves interface method calls across packages.
 
@@ -659,6 +699,7 @@ class TestGotoDefinitionInterfaceMethod:
 #     gin.go:202  func New(opts ...OptionFunc) *Engine
 #     gin.go:236  func Default(opts ...OptionFunc) *Engine
 # ---------------------------------------------------------------------------
+@pytest.mark.skipif(not _HAS_GOPLS, reason="gopls not installed")
 class TestGotoDefinitionThirdParty:
     """Resolves qualified calls to 3rd-party package functions.
 
@@ -801,6 +842,7 @@ class TestGotoDefinitionThirdParty:
 # The first three (returned/assigned/passed) reproduce the bug.
 # The last two (immediate-invoke, direct) are control cases that already work.
 # ---------------------------------------------------------------------------
+@pytest.mark.skipif(not _HAS_GOPLS, reason="gopls not installed")
 class TestGotoDefinitionInClosure:
     """Resolves method calls inside function literals (closures).
 
@@ -861,6 +903,39 @@ class TestGotoDefinitionInClosure:
         assert 12 <= result["col"] <= 19, (
             f"expected col in [12, 19] (the 'Publish' member), got col={result['col']}"
         )
+
+    # ---- returned closure: path/name variants ---------------------------
+    #
+    # The returned-closure bug is path-dependent: it only manifests when
+    # ALL THREE conditions hold:
+    #   1. absolute file path
+    #   2. returned function literal
+    #   3. qualified name (c.Publish, not just Publish)
+    # Removing any one condition makes the call resolve correctly.
+    # These tests pin down each condition individually.
+
+    def test_returned_closure_qualified_name_absolute_path(self, tools):
+        """c.Publish with an absolute path inside a returned closure —
+        the exact combination that triggers the bug.  Must NOT return empty."""
+        result = tools["goto_definition"](CLOSURE_FILE, 21, "c.Publish")
+        assert result, (
+            "got empty result for absolute path + returned closure + "
+            "qualified name — this is the reported bug"
+        )
+        assert self._basename(result["file"]) == "controller.go"
+        assert result["line"] == 16
+
+    def test_returned_closure_simple_name_absolute_path(self, tools):
+        """Publish (simple name) with an absolute path inside a returned
+        closure must resolve — removing the qualified-name condition
+        fixes it, proving the bug requires the qualified name."""
+        result = tools["goto_definition"](CLOSURE_FILE, 21, "Publish")
+        assert result, (
+            "got empty result for simple name — the bug requires a "
+            "qualified name; a simple identifier should resolve"
+        )
+        assert self._basename(result["file"]) == "controller.go"
+        assert result["line"] == 16
 
     # ---- assigned closure: closure.go:29 --------------------------------
 
@@ -967,3 +1042,114 @@ class TestGotoDefinitionInClosure:
             assert result["line"] == 16, (
                 f"{label} at line {line}: expected line 16, got {result.get('line')}"
             )
+
+
+# get_callees — requires gopls inside the sandbox
+@pytest.mark.skipif(not _HAS_GOPLS, reason="gopls not installed")
+class TestGetCallees:
+    def _publish_line(self, tools):
+        symbols = tools["get_file_outline"](CONTROLLER_FILE)
+        return next(s for s in symbols if s["name"] == "Publish")["line"]
+
+    def test_finds_to_context_or_from_context(self, tools):
+        line = self._publish_line(tools)
+        callees = tools["get_callees"](CONTROLLER_FILE, line)
+        names = [c["name"] for c in callees]
+        assert "ToContext" in names or "FromContext" in names
+
+    def test_callees_cross_package(self, tools):
+        line = self._publish_line(tools)
+        callees = tools["get_callees"](CONTROLLER_FILE, line)
+        files = [c["file"] for c in callees]
+        assert any("controller.go" not in f for f in files)
+
+    def test_callees_have_required_keys(self, tools):
+        line = self._publish_line(tools)
+        callees = tools["get_callees"](CONTROLLER_FILE, line)
+        for c in callees:
+            assert "file" in c
+            assert "line" in c
+            assert c["line"] >= 1
+
+    def test_no_callees_for_empty_func(self, tools):
+        symbols = tools["get_file_outline"](SHARED_FILE)
+        fc = next(s for s in symbols if s["name"] == "UnusedFunc")
+        callees = tools["get_callees"](SHARED_FILE, fc["line"])
+        assert isinstance(callees, list)
+
+
+# get_callers — requires gopls inside the sandbox
+@pytest.mark.skipif(not _HAS_GOPLS, reason="gopls not installed")
+class TestGetCallers:
+    def _to_context_line(self, tools):
+        symbols = tools["get_file_outline"](SHARED_FILE)
+        return next(s for s in symbols if s["name"] == "ToContext")["line"]
+
+    def test_controller_is_a_caller(self, tools):
+        line = self._to_context_line(tools)
+        callers = tools["get_callers"](SHARED_FILE, line)
+        files = [c["file"] for c in callers]
+        assert any("controller.go" in f for f in files)
+
+    def test_callers_have_required_keys(self, tools):
+        line = self._to_context_line(tools)
+        callers = tools["get_callers"](SHARED_FILE, line)
+        for c in callers:
+            assert "file" in c
+            assert "line" in c
+
+    def test_no_callers_for_unused_func(self, tools):
+        symbols = tools["get_file_outline"](SHARED_FILE)
+        line = next(s for s in symbols if s["name"] == "UnusedFunc")["line"]
+        callers = tools["get_callers"](SHARED_FILE, line)
+        assert callers == []
+
+
+# Agent workflow — validates the agent actually uses all context tools
+@pytest.mark.asyncio
+async def test_agent_uses_context_tools(run_sh: Path) -> None:
+    """Ensure the agent can use every context tool to analyze Go source code
+    in a monorepo layout."""
+    client = RecordingClient(prefix="acp_go_context_monorepo_test_")
+    with client:
+        src = Path(__file__).parent / "sample" / "go" / "monorepo"
+        dst = client.temp_dir
+        # Copy monorepo Go project into temp_dir root so _detect_language
+        # finds go.mod and creates GoTracer for the agent.
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+
+        await run_agent(
+            client,
+            run_sh,
+            f"""
+            In the directory {dst}, there is a Go monorepo project with packages
+            under private/service/api, private/service/internal/shared, public/client,
+            and e2e-tests/suite.
+            I need you to do a full cross-reference analysis of the function 'ToContext':
+            1. Use find_symbol to locate 'ToContext'.
+            2. Use get_file_outline on context.go to see all symbols in that file.
+            3. Use goto_definition from controller.go to find where shared.ToContext is defined.
+            4. Use get_source to read the full source code of ToContext.
+            5. Use get_callers on ToContext to see who calls it.
+            6. Use get_callees on the Publish method in controller.go to see what it calls.
+            Report back what ToContext does, what calls it, and what Publish calls.
+            """,
+        )
+
+        called_tools = {
+            update.title
+            for update in client.updates
+            if isinstance(update, ToolCallStart)
+        }
+        required = {
+            "find_symbol",
+            "get_file_outline",
+            "goto_definition",
+            "get_source",
+            "get_callers",
+            "get_callees",
+        }
+        missing = required - called_tools
+        assert not missing, (
+            f"Agent did not call these context tools: {missing}. Called: {called_tools}"
+        )
