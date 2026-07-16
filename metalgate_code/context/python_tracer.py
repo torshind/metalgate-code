@@ -1,22 +1,22 @@
-"""Python-specific tracer using ty language server and tree-sitter.
+"""Python-specific tracer using the ty language server and tree-sitter.
 
-Replaces the former jedi/parso-based implementation with Astral's ``ty``
-language server, run as a subprocess inside the microsandbox VM.  LSP
-communication is handled by :class:`~metalgate_code.context.ty_lsp_client.TyLspClient`.
+LSP communication is handled by
+:class:`~metalgate_code.context.ty_lsp_client.TyLspClient`.
 
 ``find_symbol`` uses LSP ``workspace/symbol`` — project files only, not
-site-packages (confirmed from ty 0.0.55 source).  For third-party symbols,
-use ``goto_definition`` from a usage site.
+site-packages.  For third-party symbols, use ``goto_definition`` from a
+usage site.
 
-Tree-sitter is retained for:
-  - ``get_source`` — line-based source extraction from tree-sitter scope nodes
-  - ``get_file_outline`` — fast outline extraction (no LSP round-trip needed)
+Tree-sitter is used for:
+  - ``get_source`` — line-based source extraction from scope nodes
+  - ``get_file_outline`` — fast outline extraction (no LSP round-trip)
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import sys
 import threading
 import urllib.parse
 from pathlib import Path
@@ -27,17 +27,22 @@ from tree_sitter import Language, Parser
 
 from metalgate_code.context.cache import _CACHE_MISS, CodeCache
 from metalgate_code.context.tracer_base import _MAX_CALLERS, Tracer
-from metalgate_code.context.ty_lsp_client import TyLspClient
+from metalgate_code.context.ty_lsp_client import (
+    LocalTyLspClient,
+    SandboxTyLspClient,
+    TyLspClient,
+)
 from metalgate_code.factory.microsandbox_backend import MicrosandboxBackend
 
 logger = logging.getLogger("metalgate_code")
 
 _STDLIB_MARKERS = ("typeshed", "/stdlib/", "/builtins.pyi")
 
-# Tree-sitter language — parsers are created per-call for thread safety.
+# Tree-sitter Python language — shared across all parses.
+# A fresh Parser is created per call (Parser is not thread-safe).
 _TS_LANGUAGE = Language(tspython.language())
 
-# LSP SymbolKind enum (subset relevant to Python).
+# LSP SymbolKind enum values → human-readable names.
 _LSP_SYMBOL_KINDS = {
     1: "file",
     2: "module",
@@ -68,17 +73,32 @@ _LSP_SYMBOL_KINDS = {
 }
 
 
+# ----------------------------------------------------------------------- #
+# Tree-sitter helpers
+#
+# All tree-sitter functions take raw bytes and return 1-based line numbers
+# (matching LSP convention).  Column numbers are 0-based.
+# ----------------------------------------------------------------------- #
+
+
 def _ts_parse(source_bytes: bytes):
-    """Parse *source_bytes* with a fresh per-call Parser (thread-safe)."""
+    """Parse *source_bytes* with a fresh Parser (thread-safe)."""
     return Parser(_TS_LANGUAGE).parse(source_bytes)
 
 
-def _ts_find_scope_at_line(source_bytes: bytes, line: int) -> Optional[tuple[int, int]]:
-    """Return (start_line_0based, end_line_1based_exclusive) of the tightest
-    function/class whose definition starts on *line* (1-based), or ``None``.
+def _ts_find_scope_node(
+    source_bytes: bytes,
+    line: int,
+    *,
+    kinds: tuple[str, ...] = ("function_definition", "class_definition"),
+    containing: bool = False,
+):
+    """Find the tightest (smallest) AST node of the given *kinds* matching *line*.
 
-    The return tuple is suitable for slicing ``source.splitlines()``:
-    ``lines[start:end]`` gives the full scope body.
+    *containing*=False → match nodes whose def starts on *line* (start == line).
+    *containing*=True  → match nodes whose body contains *line* (start <= line <= end).
+
+    Returns the tree-sitter node, or None.
     """
     tree = _ts_parse(source_bytes)
     root = tree.root_node
@@ -87,13 +107,15 @@ def _ts_find_scope_at_line(source_bytes: bytes, line: int) -> Optional[tuple[int
 
     def visit(node):
         nonlocal best, best_size
-        if node.type in ("function_definition", "class_definition"):
+        if node.type in kinds:
             start = node.start_point[0] + 1  # 1-based
             end = node.end_point[0] + 1
-            if start == line:
+            if (containing and start <= line <= end) or (
+                not containing and start == line
+            ):
                 size = end - start
                 if best is None or size < best_size:
-                    best = (node.start_point[0], node.end_point[0] + 1)
+                    best = node
                     best_size = size
         for child in node.children:
             visit(child)
@@ -102,19 +124,92 @@ def _ts_find_scope_at_line(source_bytes: bytes, line: int) -> Optional[tuple[int
     return best
 
 
+def _ts_find_scope_at_line(source_bytes: bytes, line: int) -> Optional[tuple[int, int]]:
+    """Return (start_0based, end_1based_exclusive) of the scope starting on *line*.
+
+    The tuple is suitable for slicing ``source.splitlines()``:
+    ``lines[start:end]`` gives the full scope body.
+    """
+    node = _ts_find_scope_node(source_bytes, line)
+    if node is None:
+        return None
+    return (node.start_point[0], node.end_point[0] + 1)
+
+
 def _ts_find_function_containing(
     source_bytes: bytes, line: int
 ) -> Optional[tuple[int, int, Optional[str]]]:
-    """Return (start_line_1based, end_line_1based_inclusive, func_name) of the
-    innermost function whose body contains *line* (1-based), or ``None``.
+    """Return (start_1based, end_1based, name) of the innermost function
+    whose body contains *line*, or None.
+    """
+    node = _ts_find_scope_node(
+        source_bytes, line, kinds=("function_definition",), containing=True
+    )
+    if node is None:
+        return None
+    name_node = node.child_by_field_name("name")
+    name = name_node.text.decode("utf-8", errors="replace") if name_node else None
+    return (node.start_point[0] + 1, node.end_point[0] + 1, name)
+
+
+def _ts_call_positions(
+    source_bytes: bytes, start_line: int, end_line: int
+) -> list[tuple[int, int]]:
+    """Return (line_1based, col_0based) of every function call in [start_line, end_line].
+
+    For each ``call`` node, the position targets the callable name:
+      - ``foo()``   → position of ``foo``
+      - ``obj.m()`` → position of ``m`` (the attribute, not the object)
+      - other       → position of the function expression
+
+    Decorators and class definitions are naturally excluded — they are not
+    ``call`` nodes within a function body.
     """
     tree = _ts_parse(source_bytes)
     root = tree.root_node
+    positions: list[tuple[int, int]] = []
+
+    def visit(node):
+        if node.type == "call":
+            func_node = node.child_by_field_name("function")
+            if func_node is not None:
+                # For obj.m(), target the attribute name "m", not "obj".
+                if func_node.type == "attribute":
+                    attr_node = func_node.child_by_field_name("attribute")
+                    pos_node = attr_node if attr_node is not None else func_node
+                else:
+                    pos_node = func_node
+                line_1 = pos_node.start_point[0] + 1
+                col_0 = pos_node.start_point[1]
+                if start_line <= line_1 <= end_line:
+                    positions.append((line_1, col_0))
+        for child in node.children:
+            visit(child)
+
+    visit(root)
+    return positions
+
+
+def _ts_find_function_and_calls(
+    source_bytes: bytes, line: int
+) -> Optional[tuple[int, int, Optional[str], list[tuple[int, int]]]]:
+    """Find the innermost function containing *line* and all call positions within it.
+
+    Parses once, then does two passes over the tree:
+      1. Find the innermost function_definition containing *line*.
+      2. Collect all call positions within that function's line range.
+
+    Returns (start_line, end_line, func_name, positions) or None.
+    """
+    tree = _ts_parse(source_bytes)
+    root = tree.root_node
+
+    # Pass 1: find innermost function containing *line*.
     best = None
     best_size = None
     best_name = None
 
-    def visit(node):
+    def find_fn(node):
         nonlocal best, best_size, best_name
         if node.type == "function_definition":
             start = node.start_point[0] + 1
@@ -131,57 +226,38 @@ def _ts_find_function_containing(
                         else None
                     )
         for child in node.children:
-            visit(child)
+            find_fn(child)
 
-    visit(root)
+    find_fn(root)
     if best is None:
         return None
-    return (best[0], best[1], best_name)
 
-
-def _ts_call_positions(
-    source_bytes: bytes, start_line: int, end_line: int
-) -> list[tuple[int, int]]:
-    """Return (line_1based, col_0based) of every function call in [start_line, end_line].
-
-    Walks the tree-sitter AST to find ``call`` nodes.  For each call:
-      - ``foo()``    → position of ``foo`` (identifier)
-      - ``obj.m()``  → position of ``m`` (attribute's identifier)
-      - other        → position of the function expression
-
-    Decorators, class definitions, and the function's own definition line
-    are naturally excluded — they are not ``call`` nodes within the
-    function body.
-    """
-    tree = _ts_parse(source_bytes)
-    root = tree.root_node
+    start_line, end_line = best
     positions: list[tuple[int, int]] = []
 
-    def visit(node):
+    # Pass 2: collect call positions within the function's line range.
+    def collect_calls(node):
         if node.type == "call":
             func_node = node.child_by_field_name("function")
             if func_node is not None:
                 if func_node.type == "attribute":
                     attr_node = func_node.child_by_field_name("attribute")
-                    if attr_node is not None:
-                        pos_node = attr_node
-                    else:
-                        pos_node = func_node
+                    pos_node = attr_node if attr_node is not None else func_node
                 else:
                     pos_node = func_node
-                line = pos_node.start_point[0] + 1
+                cl = pos_node.start_point[0] + 1
                 col = pos_node.start_point[1]
-                if start_line <= line <= end_line:
-                    positions.append((line, col))
+                if start_line <= cl <= end_line:
+                    positions.append((cl, col))
         for child in node.children:
-            visit(child)
+            collect_calls(child)
 
-    visit(root)
-    return positions
+    collect_calls(root)
+    return (start_line, end_line, best_name, positions)
 
 
 def _name_col_on_line(line_text: str, name: str, occurrence: int = 0) -> Optional[int]:
-    """Column of the *occurrence*-th (0-based) whole-word match of *name*.
+    """Column (0-based) of the *occurrence*-th whole-word match of *name*.
 
     By default returns the first occurrence.  Pass *occurrence* > 0 to
     resolve later references on the same line (e.g. ``foo(foo)``).
@@ -200,36 +276,15 @@ def _ts_find_identifier_in_scope(
     """Find the closest ``identifier`` node matching *name* within the scope
     containing *line* (1-based).
 
-    Returns (line_1based, col_0based) or ``None``.  Uses tree-sitter to walk
-    the AST of the innermost function (or class) containing *line*, so only
-    actual identifier nodes are matched — not strings, comments, or keywords.
-    The closest match to *line* wins.
+    Returns (line_1based, col_0based) or None.  Only actual identifier nodes
+    are matched — not strings, comments, or keywords.  The closest match to
+    *line* wins (used as a fallback when the name isn't on the given line).
     """
-    tree = _ts_parse(source_bytes)
-    root = tree.root_node
-
-    # Find the tightest function or class containing *line*.
-    best_scope = None
-    best_scope_size = None
-
-    def find_scope(node):
-        nonlocal best_scope, best_scope_size
-        if node.type in ("function_definition", "class_definition"):
-            start = node.start_point[0] + 1
-            end = node.end_point[0] + 1
-            if start <= line <= end:
-                size = end - start
-                if best_scope is None or size < best_scope_size:
-                    best_scope = node
-                    best_scope_size = size
-        for child in node.children:
-            find_scope(child)
-
-    find_scope(root)
+    best_scope = _ts_find_scope_node(source_bytes, line, containing=True)
     if best_scope is None:
         return None
 
-    # Find the closest identifier node matching *name* within that scope.
+    # Walk the scope's subtree to find the closest matching identifier.
     best: Optional[tuple[int, int]] = None
     best_dist = float("inf")
 
@@ -264,7 +319,7 @@ def _path_to_uri(path: str) -> str:
 
 
 def _is_stdlib_path(path: str) -> bool:
-    """Return True if *path* points to a stdlib/typeshed definition.
+    """True if *path* points to a stdlib/typeshed definition.
 
     These are noise in callee results — ``isinstance``, ``getattr``, ``len``,
     ``super``, ``logger.info``, etc. all resolve here.
@@ -273,30 +328,16 @@ def _is_stdlib_path(path: str) -> bool:
 
 
 def _ts_is_stub_function(source_bytes: bytes, line: int) -> bool:
-    """Return True if the function starting on *line* (1-based) is a stub.
+    """True if the function starting on *line* (1-based) is a stub.
 
-    A stub is a function whose body contains only a docstring and one of:
+    A stub body contains only a docstring and one of:
     - ``raise NotImplementedError``
     - ``pass``
     - ``...``
 
-    Uses tree-sitter to inspect the AST, not string matching.
+    Uses tree-sitter AST inspection, not string matching.
     """
-    tree = _ts_parse(source_bytes)
-    root = tree.root_node
-
-    def find_fn(node):
-        if node.type == "function_definition":
-            start = node.start_point[0] + 1
-            if start == line:
-                return node
-        for child in node.children:
-            found = find_fn(child)
-            if found is not None:
-                return found
-        return None
-
-    fn = find_fn(root)
+    fn = _ts_find_scope_node(source_bytes, line, kinds=("function_definition",))
     if fn is None:
         return False
 
@@ -304,9 +345,10 @@ def _ts_is_stub_function(source_bytes: bytes, line: int) -> bool:
     if body is None:
         return False
 
+    # Inspect each top-level statement in the body.
     for child in body.children:
         if child.type == "expression_statement":
-            # Docstring (string) is allowed in stubs.
+            # Docstring (string) is allowed in stubs — skip it.
             if any(s.type == "string" for s in child.children):
                 continue
             # Ellipsis (``...``) is a stub body.
@@ -317,59 +359,14 @@ def _ts_is_stub_function(source_bytes: bytes, line: int) -> bool:
         elif child.type == "pass_statement":
             return True
         elif child.type == "raise_statement":
-            # ``raise NotImplementedError`` — check the raised name.
+            # ``raise NotImplementedError`` is a stub; any other raise is concrete.
             text = child.text.decode("utf-8", errors="replace")
-            if "NotImplementedError" in text:
-                return True
-            return False
+            return "NotImplementedError" in text
         else:
-            # Any other statement (return, assignment, etc.) is concrete.
+            # return, assignment, etc. → concrete.
             return False
 
     return False
-
-
-def _dedup_callees(results: list[dict]) -> list[dict]:
-    """Deduplicate callee results by name, keeping the most specific implementation.
-
-    When the same method appears via both its abstract declaration (a stub
-    that raises ``NotImplementedError`` or uses ``pass``/``...``) and its
-    concrete implementation, keep the concrete one.  Callees with empty
-    names are kept as-is.
-    """
-    deduped: list[dict] = []
-    by_name: dict[str, dict] = {}
-    for r in results:
-        rname = r.get("name", "")
-        if not rname:
-            deduped.append(r)
-            continue
-        existing = by_name.get(rname)
-        if existing is None:
-            by_name[rname] = r
-            deduped.append(r)
-        elif _callee_is_stub(existing) and not _callee_is_stub(r):
-            # Replace the abstract entry with the concrete one.
-            deduped[deduped.index(existing)] = r
-            by_name[rname] = r
-    return deduped
-
-
-def _callee_is_stub(callee: dict) -> bool:
-    """Whether a callee result points to a stub/abstract method.
-
-    Uses tree-sitter to inspect the function body at the callee's location.
-    """
-    file = callee.get("file", "")
-    line = callee.get("line", 0)
-    if not file or not line:
-        return False
-    try:
-        with open(file, encoding="utf-8", errors="replace") as f:
-            source = f.read()
-    except OSError:
-        return False
-    return _ts_is_stub_function(source.encode("utf-8", errors="replace"), line)
 
 
 def _lsp_symbol_kind_to_str(kind_num: int) -> str:
@@ -380,20 +377,25 @@ def _lsp_symbol_kind_to_str(kind_num: int) -> str:
 def _parse_hover(hover: object) -> tuple[str, str]:
     """Extract (signature, docstring) from an LSP hover response.
 
-    LSP hover ``contents`` may be ``MarkupContent`` (dict with ``value``),
-    a plain string, or a list of ``MarkedString``.  The first non-empty
-    line is treated as the signature; the remainder as the docstring.
+    LSP hover ``contents`` may be:
+    - MarkupContent (dict with ``value``)
+    - a plain string
+    - a list of MarkedString entries
+
+    The first non-empty line is treated as the signature; the rest as the
+    docstring.  Markdown code fences are stripped if present.
     """
     if not hover or not isinstance(hover, dict):
         return "", ""
     contents = hover.get("contents", {})
-    value = ""
+
+    # Normalize the three possible contents shapes into a single string.
     if isinstance(contents, dict):
         value = contents.get("value", "")
     elif isinstance(contents, str):
         value = contents
     elif isinstance(contents, list):
-        # MarkedString list — join all string entries.
+        # MarkedString list — join all string/dict entries.
         parts: list[str] = []
         for entry in contents:
             if isinstance(entry, str):
@@ -403,8 +405,12 @@ def _parse_hover(hover: object) -> tuple[str, str]:
                 if isinstance(val, str):
                     parts.append(val)
         value = "\n".join(p for p in parts if p)
+    else:
+        value = ""
+
     if not value:
         return "", ""
+
     # Strip markdown code fences if present.
     lines = str(value).strip().splitlines()
     if lines and lines[0].strip().startswith("```"):
@@ -413,6 +419,7 @@ def _parse_hover(hover: object) -> tuple[str, str]:
             lines = lines[:-1]
     if not lines:
         return "", ""
+
     signature = lines[0].strip()
     docstring = "\n".join(lines[1:]).strip() if len(lines) > 1 else ""
     return signature, docstring
@@ -429,19 +436,22 @@ class PythonTracer(Tracer):
     ) -> None:
         super().__init__(root, backend, cache)
         self._lsp: Optional[TyLspClient] = None
-        self._lsp_lock = threading.Lock()
-        # Serializes all LSP requests (did_open + references/definition/hover).
-        # The ty server is single-threaded; concurrent requests from parallel
-        # tool calls cause "content modified" errors and timeouts.  RLock so
+        self._lsp_lock = threading.Lock()  # guards _lsp creation
+        # Serializes all LSP requests.  ty is single-threaded; concurrent
+        # requests cause "content modified" errors.  RLock (not Lock) so
         # _resolve can call find_symbol while already holding the lock.
         self._lsp_request_lock = threading.RLock()
         self._ms: Optional[MicrosandboxBackend] = None
-        # LSP document lifecycle: track which URIs are already open.
-        self._open_docs: set[str] = set()
+        self._open_docs: set[str] = set()  # URIs already opened via did_open
 
     @property
     def ms(self) -> MicrosandboxBackend:
-        """The MicrosandboxBackend instance (validated once, then cached)."""
+        """The MicrosandboxBackend (validated once, then cached).
+
+        Raises RuntimeError if the backend is not a MicrosandboxBackend.
+        Callers that don't require the sandbox should check
+        :meth:`_is_sandbox` first.
+        """
         if self._ms is not None:
             return self._ms
         if not isinstance(self.backend, MicrosandboxBackend):
@@ -449,31 +459,52 @@ class PythonTracer(Tracer):
         self._ms = self.backend
         return self._ms
 
+    @property
+    def _is_sandbox(self) -> bool:
+        """True when the backend is a MicrosandboxBackend."""
+        return isinstance(self.backend, MicrosandboxBackend)
+
     # ------------------------------------------------------------------ #
-    # LSP document lifecycle management
+    # Path translation (host ↔ guest)
+    # ------------------------------------------------------------------ #
+
+    def _to_guest_path(self, file: str) -> str:
+        """Translate a host path to a guest path (sandbox only).
+
+        For non-sandbox backends, paths are already host paths and are
+        returned unchanged.
+        """
+        if self._is_sandbox:
+            return self.ms._resolve_guest_path(file)
+        return file
+
+    def _to_host_path(self, path: str) -> str:
+        """Translate a guest path to a host path (sandbox only).
+
+        For non-sandbox backends, paths are already host paths and are
+        returned unchanged.
+        """
+        if self._is_sandbox:
+            return self.ms._to_host_path(path)
+        return path
+
+    # ------------------------------------------------------------------ #
+    # LSP document lifecycle
     # ------------------------------------------------------------------ #
 
     def _did_open(self, lsp: TyLspClient, uri: str, source: str) -> None:
         """Open *uri* in the LSP server if not already open.
 
-        LSP ``textDocument/didOpen`` is meant to be called once per document.
-        Repeated calls for the same URI are skipped to avoid server errors.
-        Always called within ``_lsp_request_lock`` so no separate lock needed.
+        did_open must be called once per document; repeated calls cause
+        server errors.  Always called within _lsp_request_lock.
         """
         if uri in self._open_docs:
             return
         self._open_docs.add(uri)
         lsp.did_open(uri, source)
 
-    def _get_lsp(self) -> TyLspClient:
-        """Get or lazily create the ty LSP client (thread-safe).
-
-        The venv (``venv_bin`` / ``venv_env``) is established by the backend
-        during sandbox boot via :class:`~metalgate_code.factory.venv_manager.VenvManager`.
-        The tracer consumes it directly — it never manipulates or discovers
-        the venv itself.  ``python_path`` is derived from ``venv_bin`` when
-        available.
-        """
+    def _get_lsp(self) -> TyLspClient | LocalTyLspClient:
+        """Get or lazily create the ty LSP client (double-checked locking)."""
         if self._lsp is not None:
             return self._lsp
 
@@ -481,21 +512,26 @@ class PythonTracer(Tracer):
             if self._lsp is not None:
                 return self._lsp
 
-            sb = self.ms._ensure_sandbox_sync()
-            guest_root = self.ms._to_guest_path(str(self.root))
-            root_uri = _path_to_uri(guest_root)
+            if self._is_sandbox:
+                sb = self.ms._ensure_sandbox_sync()
+                guest_root = self.ms._to_guest_path(str(self.root))
+                root_uri = _path_to_uri(guest_root)
 
-            venv_bin = self.ms.venv_bin
-            venv_env = self.ms.venv_env
-            python_path = f"{venv_bin}/python" if venv_bin else None
+                venv_bin = self.ms.venv_bin
+                venv_env = self.ms.venv_env
+                python_path = f"{venv_bin}/python" if venv_bin else None
 
-            self._lsp = TyLspClient(
-                sb,
-                root_uri,
-                python_path=python_path,
-                venv_bin=venv_bin,
-                venv_env=venv_env,
-            )
+                self._lsp = SandboxTyLspClient(
+                    sb,
+                    root_uri,
+                    python_path=python_path,
+                    venv_bin=venv_bin,
+                    venv_env=venv_env,
+                )
+            else:
+                root_uri = _path_to_uri(str(self.root))
+                self._lsp = LocalTyLspClient(root_uri, python_path=sys.executable)
+
             self._lsp.start()
             return self._lsp
 
@@ -504,7 +540,8 @@ class PythonTracer(Tracer):
     # ------------------------------------------------------------------ #
 
     def get_file_outline(self, file: str) -> list[dict]:
-        """Parse *file* and return every class/function/method with name, kind, line, end_line, signature."""
+        """Parse *file* and return every class/function/method with
+        name, kind, line, end_line, signature."""
         cached = self.cache.get_outline(file)
         if cached is not None:
             return cached
@@ -520,7 +557,11 @@ class PythonTracer(Tracer):
         return result
 
     def _ts_outline(self, source: str, file: str) -> list[dict]:
-        """Extract outline using tree-sitter."""
+        """Extract outline using tree-sitter (no LSP round-trip needed).
+
+        Walks the AST collecting function_definition and class_definition
+        nodes.  For classes, recurses into the body block to find methods.
+        """
         source_bytes = source.encode("utf-8", errors="replace")
         tree = _ts_parse(source_bytes)
         root = tree.root_node
@@ -533,19 +574,15 @@ class PythonTracer(Tracer):
                     return
 
                 name = name_node.text.decode("utf-8", errors="replace")
-
                 params_node = node.child_by_field_name("parameters")
-                param_str = "..."
-                if params_node:
-                    param_str = params_node.text.decode("utf-8", errors="replace")
-
-                is_async = False
-                for child in node.children:
-                    if child.type == "async":
-                        is_async = True
-                        break
-
+                param_str = (
+                    params_node.text.decode("utf-8", errors="replace")
+                    if params_node
+                    else "..."
+                )
+                is_async = any(child.type == "async" for child in node.children)
                 prefix = "async def " if is_async else "def "
+
                 result.append(
                     {
                         "name": name,
@@ -564,6 +601,7 @@ class PythonTracer(Tracer):
 
                 name = name_node.text.decode("utf-8", errors="replace")
 
+                # Extract base classes from the argument_list, if any.
                 bases = ""
                 for child in node.children:
                     if child.type == "argument_list":
@@ -581,6 +619,7 @@ class PythonTracer(Tracer):
                         ),
                     }
                 )
+                # Recurse into the class body block to find methods.
                 for child in node.children:
                     if child.type == "block":
                         for sub in child.children:
@@ -597,7 +636,11 @@ class PythonTracer(Tracer):
     def goto_definition(
         self, file: str, line: int, name: Optional[str] = None
     ) -> Optional[dict]:
-        """Resolve the symbol *name* on *line* of *file* to its definition."""
+        """Resolve the symbol *name* on *line* of *file* to its definition.
+
+        If *name* is None, the first identifier on *line* is used.
+        Results are cached.
+        """
         if name is None:
             name = self._first_name_on_line(file, line)
             if name is None:
@@ -615,11 +658,9 @@ class PythonTracer(Tracer):
     def get_source(self, file: str, line: int, context: int = 60) -> dict:
         """Return the full source of the function/class starting on *line*.
 
-        If tree-sitter finds a scope (function or class definition) starting
-        on *line*, the entire scope body is returned and *context* is ignored.
-
-        If no scope is found at *line*, a fallback window of *context* lines
-        centred around *line* is returned instead, and a warning is logged.
+        If tree-sitter finds a scope starting on *line*, the entire scope body
+        is returned and *context* is ignored.  Otherwise, a fallback window
+        of *context* lines centred around *line* is returned.
         """
         try:
             source = self._read_file(file)
@@ -663,7 +704,11 @@ class PythonTracer(Tracer):
             }
 
     def get_callers(self, file: str, line: int) -> list[dict]:
-        """Find every place in the project that references the symbol on *line* of *file*."""
+        """Find every place in the project that references the symbol on *line* of *file*.
+
+        Uses LSP textDocument/references.  For each reference, determines the
+        enclosing function/method name via outline lookup.
+        """
         # Read the file once and derive col + name from the same source.
         try:
             source = self._read_file(file)
@@ -680,7 +725,7 @@ class PythonTracer(Tracer):
         sym_name = self._def_name_from_lines(lines, line)
 
         lsp = self._get_lsp()
-        guest_file = self.ms._resolve_guest_path(file)
+        guest_file = self._to_guest_path(file)
         uri = _path_to_uri(guest_file)
 
         with self._lsp_request_lock:
@@ -713,10 +758,11 @@ class PythonTracer(Tracer):
             ref_uri = r.get("uri", "")
             if not ref_uri:
                 continue
-            ref_file = self.ms._to_host_path(_uri_to_path(ref_uri))
+            ref_file = self._to_host_path(_uri_to_path(ref_uri))
             ref_range = r.get("range", {})
             ref_line = ref_range.get("start", {}).get("line", 0) + 1
 
+            # Skip the definition itself.
             if ref_file == file and ref_line == line:
                 continue
 
@@ -725,17 +771,11 @@ class PythonTracer(Tracer):
                 continue
             seen.add(key)
 
+            # Find the enclosing function/method name for this reference.
             caller_name = ""
             try:
                 ref_outline = self.get_file_outline(ref_file)
-                best = None
-                best_size = float("inf")
-                for sym in ref_outline:
-                    if sym["line"] <= ref_line <= sym["end_line"]:
-                        size = sym["end_line"] - sym["line"]
-                        if size < best_size:
-                            best = sym
-                            best_size = size
+                best = self._find_symbol_at_line(ref_outline, ref_line)
                 if best:
                     caller_name = best["name"]
             except Exception:
@@ -743,7 +783,7 @@ class PythonTracer(Tracer):
                     "get_file_outline failed for %s", ref_file, exc_info=True
                 )
 
-            # Read the referencing line for context
+            # Read the referencing line for context.
             context_text = ""
             try:
                 ref_source = self._read_file(ref_file, limit=max(ref_line, 1) + 1)
@@ -784,25 +824,29 @@ class PythonTracer(Tracer):
         return results
 
     def get_callees(self, file: str, line: int) -> list[dict]:
-        """Find every symbol called by the function on *line* of *file*, resolved to definitions."""
+        """Find every symbol called by the function on *line* of *file*.
+
+        Uses tree-sitter to find call positions within the function body,
+        then resolves each to its definition via LSP textDocument/definition.
+        Stdlib/builtins are filtered out.  Results are deduplicated by name,
+        preferring concrete implementations over abstract stubs.
+        """
         try:
             source = self._read_file(file)
         except OSError:
             return []
 
-        func_info = _ts_find_function_containing(
+        # Single tree walk: find the function and collect all call positions.
+        func_info = _ts_find_function_and_calls(
             source.encode("utf-8", errors="replace"), line
         )
         if func_info is None:
             return []
 
-        start_line, end_line, func_name = func_info
-        positions = _ts_call_positions(
-            source.encode("utf-8", errors="replace"), start_line, end_line
-        )
+        start_line, end_line, func_name, positions = func_info
 
         lsp = self._get_lsp()
-        guest_file = self.ms._resolve_guest_path(file)
+        guest_file = self._to_guest_path(file)
         uri = _path_to_uri(guest_file)
         results: list[dict] = []
         seen: set[tuple] = set()
@@ -830,36 +874,31 @@ class PythonTracer(Tracer):
                     defs = [defs]
 
                 for d in defs:
-                    d_uri = d.get("uri", "")
-                    if not d_uri:
+                    info = self._extract_def_info(d)
+                    if info is None:
                         continue
-                    d_file = self.ms._to_host_path(_uri_to_path(d_uri))
+                    d_file, d_line, d_col, d_uri = info
 
-                    # Skip stdlib/builtins — they add noise without aiding
-                    # codebase understanding.
+                    # Skip stdlib/builtins — noise without codebase value.
                     if _is_stdlib_path(d_file):
                         continue
-
-                    d_range = d.get("range", {})
-                    d_line = d_range.get("start", {}).get("line", 0) + 1
 
                     key = (d_file, d_line)
                     if key in seen:
                         continue
                     seen.add(key)
 
-                    # Look up name/kind from the definition file's outline
+                    # Look up name/kind/signature from the definition's outline.
                     d_name = ""
                     d_kind = ""
                     d_sig = ""
                     try:
                         outline = self.get_file_outline(d_file)
-                        for sym in outline:
-                            if sym["line"] == d_line:
-                                d_name = sym["name"]
-                                d_kind = sym["kind"]
-                                d_sig = sym.get("signature", "")
-                                break
+                        sym = self._find_symbol_at_line(outline, d_line, exact=True)
+                        if sym:
+                            d_name = sym["name"]
+                            d_kind = sym["kind"]
+                            d_sig = sym.get("signature", "")
                     except Exception:
                         logger.warning(
                             "get_file_outline failed for %s", d_file, exc_info=True
@@ -875,18 +914,51 @@ class PythonTracer(Tracer):
                         }
                     )
 
-        # Deduplicate by name: when the same method appears via both its
-        # abstract declaration and concrete implementation, keep the
-        # concrete one (detected via AST-based stub inspection).
-        return _dedup_callees(results)
+        # Deduplicate by name, preferring concrete over stub implementations.
+        return self._dedup_callees(results)
+
+    def _dedup_callees(self, results: list[dict]) -> list[dict]:
+        """Deduplicate callees by name, preferring concrete over stub implementations.
+
+        When the same method appears via both its abstract declaration (a stub
+        that raises ``NotImplementedError`` or uses ``pass``/``...``) and its
+        concrete implementation, keep the concrete one.  Callees with empty
+        names are kept as-is (no dedup possible).
+        """
+        by_name: dict[str, dict] = {}
+        unnamed: list[dict] = []
+        for r in results:
+            rname = r.get("name", "")
+            if not rname:
+                unnamed.append(r)
+                continue
+            existing = by_name.get(rname)
+            if existing is None:
+                by_name[rname] = r
+            elif self._callee_is_stub(existing) and not self._callee_is_stub(r):
+                by_name[rname] = r
+        return unnamed + list(by_name.values())
+
+    def _callee_is_stub(self, callee: dict) -> bool:
+        """True if *callee* points to a stub/abstract method (pass/.../raise
+        NotImplementedError).  Uses tree-sitter to inspect the function body.
+        """
+        file = callee.get("file", "")
+        line = callee.get("line", 0)
+        if not file or not line:
+            return False
+        try:
+            source = self._read_file(file)
+        except OSError:
+            return False
+        return _ts_is_stub_function(source.encode("utf-8", errors="replace"), line)
 
     def find_symbol(self, name: str) -> list[dict]:
         """Search for *name* across the project via LSP ``workspace/symbol``.
 
         ty's ``workspace/symbol`` indexes first-party project files only —
-        it does not search site-packages (confirmed from ty 0.0.55 source).
-        For third-party symbols, use ``goto_definition`` from a usage site,
-        which ty resolves directly to the site-packages definition.
+        it does not search site-packages.  For third-party symbols, use
+        ``goto_definition`` from a usage site.
         """
         results: list[dict] = []
         seen: set[tuple] = set()
@@ -900,7 +972,7 @@ class PythonTracer(Tracer):
                 sym_uri = location.get("uri", "")
                 if not sym_uri:
                     continue
-                sym_file = self.ms._to_host_path(_uri_to_path(sym_uri))
+                sym_file = self._to_host_path(_uri_to_path(sym_uri))
                 sym_range = location.get("range", {})
                 sym_line = sym_range.get("start", {}).get("line", 0) + 1
 
@@ -946,10 +1018,11 @@ class PythonTracer(Tracer):
     def _resolve(self, file: str, line: int, name: str) -> Optional[dict]:
         """Resolve *name* at *line* in *file* to its definition via LSP.
 
-        ty resolves usage sites directly to the actual definition —
-        first-party or site-packages.  When ty can't resolve (e.g.
-        conditional imports, type annotations in signatures), falls
-        back to ``workspace/symbol`` search by name.
+        1. Find the column of *name* on *line* (or in the enclosing scope).
+        2. Call LSP textDocument/definition at that position.
+        3. If LSP can't resolve, fall back to workspace/symbol search by name.
+        4. Get hover info for signature/docstring.
+        5. Determine kind from the definition file's outline.
         """
         try:
             source = self._read_file(file)
@@ -958,14 +1031,12 @@ class PythonTracer(Tracer):
                 return None
 
             lsp = self._get_lsp()
-            guest_file = self.ms._resolve_guest_path(file)
+            guest_file = self._to_guest_path(file)
             uri = _path_to_uri(guest_file)
 
-            # Try to resolve at the given line first.
+            # Find the column of *name* — first on the given line, then in
+            # the enclosing scope via tree-sitter.
             col = _name_col_on_line(lines[line - 1], name)
-
-            # If the name isn't on the given line, find it in the enclosing
-            # scope via tree-sitter so we can give the LSP the right position.
             if col is None:
                 found = _ts_find_identifier_in_scope(
                     source.encode("utf-8", errors="replace"), line, name
@@ -983,10 +1054,8 @@ class PythonTracer(Tracer):
                 else:
                     d_file, d_line, d_col, d_uri = None, 0, 0, None
 
+                # Fall back to workspace/symbol if LSP couldn't resolve.
                 if d_uri is None:
-                    # LSP couldn't resolve (e.g. name not on the given line,
-                    # conditional import, type annotation).  Fall back to
-                    # workspace symbol search by name.
                     if name:
                         sym_results = self.find_symbol(name)
                         if sym_results and sym_results[0].get("file"):
@@ -994,12 +1063,11 @@ class PythonTracer(Tracer):
                             d_file = sr["file"]
                             d_line = sr["line"]
                             d_col = 0
-                            d_uri = _path_to_uri(self.ms._resolve_guest_path(d_file))
+                            d_uri = _path_to_uri(self._to_guest_path(d_file))
                     if d_uri is None:
                         return None
 
-                # Get hover info for signature/docstring (only when we
-                # have a valid position in the source file).
+                # Get hover info for signature/docstring.
                 signature = ""
                 docstring = ""
                 if col is not None:
@@ -1011,17 +1079,16 @@ class PythonTracer(Tracer):
                             "hover failed for %s:%d", file, line, exc_info=True
                         )
 
-            # Determine kind from the definition file's outline
+            # Determine kind from the definition file's outline.
             kind = "unknown"
             if d_file:
                 try:
                     outline = self.get_file_outline(d_file)
-                    for sym in outline:
-                        if sym["line"] == d_line:
-                            kind = sym["kind"]
-                            if not signature:
-                                signature = sym.get("signature", "")
-                            break
+                    sym = self._find_symbol_at_line(outline, d_line, exact=True)
+                    if sym:
+                        kind = sym["kind"]
+                        if not signature:
+                            signature = sym.get("signature", "")
                 except Exception:
                     logger.warning(
                         "get_file_outline failed for %s", d_file, exc_info=True
@@ -1042,6 +1109,41 @@ class PythonTracer(Tracer):
             )
             return None
 
+    def _find_symbol_at_line(
+        self, outline: list[dict], line: int, *, exact: bool = False
+    ) -> Optional[dict]:
+        """Find the symbol at *line* in *outline*.
+
+        If *exact*, return the symbol whose ``line`` matches exactly.
+        Otherwise, return the tightest enclosing scope (smallest range
+        containing *line*).
+        """
+        best = None
+        best_size = float("inf")
+        for sym in outline:
+            if exact:
+                if sym["line"] == line:
+                    return sym
+            elif sym["line"] <= line <= sym["end_line"]:
+                size = sym["end_line"] - sym["line"]
+                if size < best_size:
+                    best = sym
+                    best_size = size
+        return best
+
+    def _extract_def_info(self, d: dict) -> Optional[tuple[str, int, int, str]]:
+        """Extract (file, line_1based, col, uri) from a single LSP
+        definition dict.  Returns None if the dict has no valid uri.
+        """
+        d_uri = d.get("uri", "")
+        if not d_uri:
+            return None
+        d_file = self._to_host_path(_uri_to_path(d_uri))
+        d_range = d.get("range", {})
+        d_line = d_range.get("start", {}).get("line", 0) + 1
+        d_col = d_range.get("start", {}).get("character", 0)
+        return d_file, d_line, d_col, d_uri
+
     def _lsp_definition(
         self,
         lsp: TyLspClient,
@@ -1049,23 +1151,21 @@ class PythonTracer(Tracer):
         line_0: int,
         col: int,
     ) -> tuple[Optional[str], int, int, Optional[str]]:
-        """Call LSP definition and return (file, line_1based, col, uri)."""
+        """Call LSP textDocument/definition and return
+        (file, line_1based, col, uri) for the first result.
+        """
         defs = lsp.definition(uri, line_0, col)
         if not defs:
             return None, 0, 0, None
         if isinstance(defs, dict):
             defs = [defs]
-        d = defs[0]
-        d_uri = d.get("uri", "")
-        if not d_uri:
+        info = self._extract_def_info(defs[0])
+        if info is None:
             return None, 0, 0, None
-        d_file = self.ms._to_host_path(_uri_to_path(d_uri))
-        d_range = d.get("range", {})
-        d_line = d_range.get("start", {}).get("line", 0) + 1
-        d_col = d_range.get("start", {}).get("character", 0)
-        return d_file, d_line, d_col, d_uri
+        return info
 
     def _first_name_on_line(self, file: str, line: int) -> Optional[str]:
+        """Return the first identifier-like token on *line* of *file*."""
         try:
             source = self._read_file(file)
             lines = source.splitlines()
@@ -1080,18 +1180,12 @@ class PythonTracer(Tracer):
             )
         return None
 
-    def _def_name_col(self, file: str, line: int) -> Optional[int]:
-        """Column of the name token on a def/class line."""
-        try:
-            source = self._read_file(file)
-            lines = source.splitlines()
-            return self._def_name_col_from_lines(lines, line)
-        except OSError:
-            logger.warning("Failed to read %s for _def_name_col", file, exc_info=True)
-            return None
-
     def _def_name_col_from_lines(self, lines: list[str], line: int) -> Optional[int]:
-        """Column of the name token on a def/class line, from pre-read lines."""
+        """Column of the name token on a def/class line.
+
+        For ``def foo()`` returns the column of ``foo``.  Returns None if
+        the line is not a def/class definition.
+        """
         if line < 1 or line > len(lines):
             return None
         raw = lines[line - 1]
@@ -1102,18 +1196,12 @@ class PythonTracer(Tracer):
                 return indent + len(kw)
         return None
 
-    def _def_name(self, file: str, line: int) -> Optional[str]:
-        """Extract the symbol name from a def/class line."""
-        try:
-            source = self._read_file(file)
-            lines = source.splitlines()
-            return self._def_name_from_lines(lines, line)
-        except OSError:
-            logger.warning("Failed to read %s for _def_name", file, exc_info=True)
-            return None
-
     def _def_name_from_lines(self, lines: list[str], line: int) -> Optional[str]:
-        """Extract the symbol name from a def/class line, from pre-read lines."""
+        """Extract the symbol name from a def/class line.
+
+        For ``def foo(x):`` returns ``foo``.  The name is everything after
+        the keyword up to ``(``, ``:``, or whitespace.
+        """
         if line < 1 or line > len(lines):
             return None
         raw = lines[line - 1]
@@ -1121,7 +1209,7 @@ class PythonTracer(Tracer):
         for kw in ("async def ", "def ", "class "):
             if stripped.startswith(kw):
                 rest = stripped[len(kw) :]
-                # name is up to '(' or ':' or whitespace
+                # Name ends at '(' ':' or whitespace.
                 for i, ch in enumerate(rest):
                     if ch in "((: \t":
                         return rest[:i] if i > 0 else None

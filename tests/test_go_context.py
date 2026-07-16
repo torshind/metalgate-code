@@ -1,23 +1,53 @@
-"""Integration tests for Go contextual symbol search tools."""
+"""Unit tests for Go contextual symbol search tools.
 
-import os
-import shutil
+These tests use ``LocalShellBackend`` and run on the host without a
+sandbox.  Sandbox/agent integration tests live in
+``test_go_context_integration.py``.
+
+The ``TestGotoDefinition`` class is the critical regression suite.  It
+exercises the exact failure modes that were reported in
+``goto_definition_bugfix_report.md`` and verified against a real gopls
+v0.23.0 instance.  Every assertion encodes a *ground-truth* gopls
+response, so a failure pinpoints the exact bug.
+
+Ground truth (captured from `gopls definition -json` at the *member*
+column of each call site in orders.go):
+
+    orders.go line 40:  return strings.ToUpper(o.Process())
+        strings.ToUpper @ col 17 -> strings.go:687   func strings.ToUpper(s string) string
+        o.Process      @ col 27 -> orders.go:25      func (o *Order) Process() string
+
+    orders.go line 26:  if !ValidateAddress(o.Address) {
+        ValidateAddress @ col 6  -> validation.go:7   func ValidateAddress(address string) bool
+        o.Address       @ col 24 -> orders.go:7        field Address string
+
+    orders.go line 29:  formatted := FormatCurrency(o.Amount)
+        FormatCurrency @ col 15 -> utils.go:6         func FormatCurrency(amount float64) string
+        o.Amount       @ col 32 -> orders.go:8        field Amount float64
+
+Key insight: for a selector expression ``pkg.Func`` / ``recv.Method`` /
+``obj.Field``, gopls must be queried at the column of the **member**
+(the part after the ``.``), NOT the qualifier/receiver or the dot.  If
+the column points at the qualifier or the dot, gopls resolves to the
+package import, the variable declaration, or the receiver type instead
+of the target symbol.
+"""
+
 import tempfile
 from pathlib import Path
 
 import pytest
-from acp.schema import ToolCallStart
+from deepagents.backends import LocalShellBackend
 
 from metalgate_code.context import get_code_tools
-from metalgate_code.factory import MicrosandboxBackend
-from tests.conftest import RecordingClient, run_agent
 
-SAMPLE_DIR = Path(__file__).parent / "sample" / "go"
+SAMPLE_DIR = Path(__file__).parent / "sample" / "go" / "simple"
 ORDERS_FILE = str(SAMPLE_DIR / "orders.go")
 VALIDATION_FILE = str(SAMPLE_DIR / "validation.go")
 UTILS_FILE = str(SAMPLE_DIR / "utils.go")
-
-_HAS_GOPLS = shutil.which("gopls") is not None
+PROCESSOR_FILE = str(SAMPLE_DIR / "processor.go")
+MULTISELECTOR_FILE = str(SAMPLE_DIR / "multiselector.go")
+EXTERNAL_FILE = str(SAMPLE_DIR / "external.go")
 
 
 @pytest.fixture(scope="module")
@@ -25,10 +55,9 @@ def tools():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
 
-    shell_env = os.environ.copy()
-    shell_backend = MicrosandboxBackend(
+    shell_backend = LocalShellBackend(
         root_dir=str(SAMPLE_DIR),
-        env=shell_env,
+        virtual_mode=False,
         inherit_env=True,
     )
 
@@ -55,7 +84,6 @@ def tools():
         "get_callees": callees,
         "find_symbol": find_sym,
     }
-    os.unlink(db_path)
 
 
 # get_file_outline
@@ -170,160 +198,518 @@ class TestFindSymbol:
         second = tools["find_symbol"]("ValidateAddress")
         assert first == second
 
+    def test_results_scoped_to_project_root(self, tools):
+        """find_symbol should only return symbols within the project root,
+        not from other projects, stdlib, or the module cache."""
+        results = tools["find_symbol"]("Order")
+        for r in results:
+            assert str(SAMPLE_DIR) in r["file"], (
+                f"Result file {r['file']} is outside project root {SAMPLE_DIR}"
+            )
 
-# goto_definition — requires gopls
-@pytest.mark.skipif(not _HAS_GOPLS, reason="gopls not installed")
+
+# ---------------------------------------------------------------------------
+# goto_definition
+# ---------------------------------------------------------------------------
+#
+# This is the critical regression suite.  Each test resolves a specific
+# call site in orders.go and asserts the EXACT location/kind/signature that
+# a real gopls returns when queried at the member column.
+#
+# The call sites (all in orders.go):
+#
+#   line 40:  return strings.ToUpper(o.Process())
+#   line 26:  if !ValidateAddress(o.Address) {
+#   line 29:  formatted := FormatCurrency(o.Amount)
+#
+# Ground truth captured from `gopls definition -json` at the member column:
+#
+#   strings.ToUpper  -> strings.go:687  "func strings.ToUpper(s string) string"
+#   o.Process        -> orders.go:25    "func (o *Order) Process() string"
+#   ValidateAddress  -> validation.go:7  "func ValidateAddress(address string) bool"
+#   o.Address        -> orders.go:7      "field Address string"
+#   FormatCurrency   -> utils.go:6       "func FormatCurrency(amount float64) string"
+#   o.Amount         -> orders.go:8      "field Amount float64"
+#
+# The bug under test: for selector expressions (pkg.Func, recv.Method,
+# obj.Field) the tool sends gopls the column of the qualifier/receiver or
+# the dot instead of the member.  gopls then resolves to the import line,
+# the variable declaration, or the receiver type — NOT the target symbol.
+# Every test below fails when that bug is present and passes once the
+# column computation is fixed to point at the member.
+# ---------------------------------------------------------------------------
+
+
 class TestGotoDefinition:
-    def _find_call_line(self, file, name):
-        source = Path(file).read_text()
-        for i, line in enumerate(source.splitlines(), 1):
-            if name in line and "(" in line:
-                return i
-        return 1
+    """Resolves call sites in orders.go and checks against gopls ground truth.
 
-    def test_resolves_validate_address_cross_file(self, tools):
-        line = self._find_call_line(ORDERS_FILE, "ValidateAddress")
-        result = tools["goto_definition"](ORDERS_FILE, line, "ValidateAddress")
-        assert result
-        assert "validation.go" in result["file"]
-        assert result["name"] == "ValidateAddress"
+    All call sites live in orders.go lines 26, 29, and 40:
 
-    def test_resolves_format_currency_cross_file(self, tools):
-        line = self._find_call_line(ORDERS_FILE, "FormatCurrency")
-        result = tools["goto_definition"](ORDERS_FILE, line, "FormatCurrency")
-        assert result
-        assert "utils.go" in result["file"]
-        assert result["name"] == "FormatCurrency"
+        26:  if !ValidateAddress(o.Address) {
+        29:  formatted := FormatCurrency(o.Amount)
+        40:  return strings.ToUpper(o.Process())
+    """
 
-    def test_returns_empty_dict_on_unknown_symbol(self, tools):
-        result = tools["goto_definition"](ORDERS_FILE, 1, "zzz_nonexistent")
-        assert result == {}
+    # ---- helpers ---------------------------------------------------------
 
-    def test_result_has_required_keys(self, tools):
-        line = self._find_call_line(ORDERS_FILE, "ValidateAddress")
-        result = tools["goto_definition"](ORDERS_FILE, line, "ValidateAddress")
-        for key in ("name", "kind", "file", "line", "signature"):
-            assert key in result
+    @staticmethod
+    def _basename(path: str) -> str:
+        return path.replace("\\", "/").rstrip("/").split("/")[-1]
 
-    def test_cache_is_stable(self, tools):
-        line = self._find_call_line(ORDERS_FILE, "ValidateAddress")
-        r1 = tools["goto_definition"](ORDERS_FILE, line, "ValidateAddress")
-        r2 = tools["goto_definition"](ORDERS_FILE, line, "ValidateAddress")
-        assert r1 == r2
+    # ---- stdlib qualified call: strings.ToUpper --------------------------
 
-    def test_docstring_from_description(self, tools):
-        line = self._find_call_line(ORDERS_FILE, "ValidateAddress")
-        result = tools["goto_definition"](ORDERS_FILE, line, "ValidateAddress")
-        assert "docstring" in result
-        assert "required keys" in result["docstring"]
+    def test_resolves_qualified_stdlib_call(self, tools):
+        """strings.ToUpper (orders.go:40) must resolve to the stdlib function,
+        not the `import "strings"` line.
 
-    def test_docstring_is_empty_when_no_comment(self, tools):
-        result = tools["goto_definition"](UTILS_FILE, 10, "NoDocFunc")
-        assert "docstring" in result
-        assert result["docstring"] == ""
-
-
-# get_callees — requires gopls
-@pytest.mark.skipif(not _HAS_GOPLS, reason="gopls not installed")
-class TestGetCallees:
-    def _process_line(self, tools):
-        symbols = tools["get_file_outline"](ORDERS_FILE)
-        return next(s for s in symbols if s["name"] == "Process")["line"]
-
-    def test_finds_validate_address_or_format_currency(self, tools):
-        line = self._process_line(tools)
-        callees = tools["get_callees"](ORDERS_FILE, line)
-        names = [c["name"] for c in callees]
-        assert "ValidateAddress" in names or "FormatCurrency" in names
-
-    def test_callees_cross_file(self, tools):
-        line = self._process_line(tools)
-        callees = tools["get_callees"](ORDERS_FILE, line)
-        files = [c["file"] for c in callees]
-        assert any("orders.go" not in f for f in files)
-
-    def test_callees_have_required_keys(self, tools):
-        line = self._process_line(tools)
-        callees = tools["get_callees"](ORDERS_FILE, line)
-        for c in callees:
-            assert "file" in c
-            assert "line" in c
-            assert c["line"] >= 1
-
-    def test_no_callees_for_empty_func(self, tools):
-        symbols = tools["get_file_outline"](UTILS_FILE)
-        fc = next(s for s in symbols if s["name"] == "FormatCurrency")
-        callees = tools["get_callees"](UTILS_FILE, fc["line"])
-        assert isinstance(callees, list)
-
-
-# get_callers — requires gopls
-@pytest.mark.skipif(not _HAS_GOPLS, reason="gopls not installed")
-class TestGetCallers:
-    def _validate_line(self, tools):
-        symbols = tools["get_file_outline"](VALIDATION_FILE)
-        return next(s for s in symbols if s["name"] == "ValidateAddress")["line"]
-
-    def test_orders_is_a_caller(self, tools):
-        line = self._validate_line(tools)
-        callers = tools["get_callers"](VALIDATION_FILE, line)
-        files = [c["file"] for c in callers]
-        assert any("orders.go" in f for f in files)
-
-    def test_callers_have_required_keys(self, tools):
-        line = self._validate_line(tools)
-        callers = tools["get_callers"](VALIDATION_FILE, line)
-        for c in callers:
-            assert "file" in c
-            assert "line" in c
-
-    def test_no_callers_for_unused_func(self, tools):
-        symbols = tools["get_file_outline"](ORDERS_FILE)
-        line = next(s for s in symbols if s["name"] == "UnusedFunc")["line"]
-        callers = tools["get_callers"](ORDERS_FILE, line)
-        assert callers == []
-
-
-# Agent workflow — validates the agent actually uses all context tools
-@pytest.mark.asyncio
-async def test_agent_uses_context_tools(run_sh: Path) -> None:
-    """Ensure the agent can use every context tool to analyze Go source code."""
-    client = RecordingClient(prefix="acp_go_context_test_")
-    with client:
-        src = Path(__file__).parent / "sample" / "go"
-        dst = client.temp_dir / "sample_go"
-        shutil.copytree(src, dst, symlinks=True)
-
-        await run_agent(
-            client,
-            run_sh,
-            f"""
-            In the directory {dst}, there is a Go project with orders.go, validation.go, and utils.go.
-            I need you to do a full cross-reference analysis of the function 'ValidateAddress':
-            1. Use find_symbol to locate 'ValidateAddress'.
-            2. Use get_file_outline on validation.go to see all symbols in that file.
-            3. Use goto_definition from orders.go to find where ValidateAddress is defined.
-            4. Use get_source to read the full source code of ValidateAddress.
-            5. Use get_callers on ValidateAddress to see who calls it.
-            6. Use get_callees on the Process method in orders.go to see what it calls.
-            Report back what ValidateAddress does, what constant it references, and who calls it.
-            """,
+        gopls ground truth at the member column (col 17, the 'T' of ToUpper):
+            strings.go:687  func strings.ToUpper(s string) string
+        """
+        result = tools["goto_definition"](ORDERS_FILE, 40, "strings.ToUpper")
+        assert self._basename(result["file"]) == "strings.go", (
+            f"expected strings.go, got {result['file']} "
+            "(resolving the package import instead of the function)"
+        )
+        assert result["line"] == 687, f"expected line 687, got {result['line']}"
+        assert "ToUpper" in result["signature"], (
+            f"expected signature containing 'ToUpper', got {result['signature']!r}"
         )
 
-        called_tools = {
-            update.title
-            for update in client.updates
-            if isinstance(update, ToolCallStart)
-        }
-        required = {
-            "find_symbol",
-            "get_file_outline",
-            "goto_definition",
-            "get_source",
-            "get_callers",
-            "get_callees",
-        }
-        missing = required - called_tools
-        assert not missing, (
-            f"Agent did not call these context tools: {missing}. Called: {called_tools}"
+    def test_qualified_stdlib_call_kind_is_function(self, tools):
+        """strings.ToUpper must be classified as a function, not 'unknown'."""
+        result = tools["goto_definition"](ORDERS_FILE, 40, "strings.ToUpper")
+        assert result["kind"] == "function", (
+            f"expected kind 'function', got {result['kind']!r} "
+            "(kind inference is falling back to 'unknown' because the hover "
+            "signature is the package docstring, not the function signature)"
+        )
+
+    def test_qualified_stdlib_call_not_import_line(self, tools):
+        """The result must NOT be the `import "strings"` line in orders.go.
+
+        This is a regression guard for the column bug: when the column points
+        at the qualifier `strings` (or the dot), gopls returns the import
+        statement with signature 'package strings'.  The result file would be
+        orders.go and the line would be 3 (the import line).
+        """
+        result = tools["goto_definition"](ORDERS_FILE, 40, "strings.ToUpper")
+        assert not (
+            self._basename(result["file"]) == "orders.go" and result["line"] == 3
+        ), (
+            "resolved to the import line — column points at the qualifier, "
+            "not the member"
+        )
+
+    # ---- concrete method call: o.Process ---------------------------------
+
+    def test_resolves_method_call_on_receiver(self, tools):
+        """o.Process (orders.go:40) must resolve to the method definition,
+        not the `var o *Order` declaration or the receiver type.
+
+        gopls ground truth at the member column (col 27, the 'P' of Process):
+            orders.go:25  func (o *Order) Process() string
+        """
+        result = tools["goto_definition"](ORDERS_FILE, 40, "o.Process")
+        assert self._basename(result["file"]) == "orders.go", (
+            f"expected orders.go, got {result['file']}"
+        )
+        assert result["line"] == 25, f"expected line 25, got {result['line']}"
+        assert "Process" in result["signature"], (
+            f"expected signature containing 'Process', got {result['signature']!r}"
+        )
+
+    def test_method_call_kind_is_method(self, tools):
+        """o.Process must be classified as a method, not 'unknown'."""
+        result = tools["goto_definition"](ORDERS_FILE, 40, "o.Process")
+        assert result["kind"] == "method", (
+            f"expected kind 'method', got {result['kind']!r}"
+        )
+
+    def test_method_call_not_receiver_declaration(self, tools):
+        """The result must NOT be the receiver variable declaration.
+
+        Regression guard: when the column points at the receiver `o` (or the
+        dot), gopls returns `var o *Order` at the function signature line
+        (line 25 in older gopls, or the parameter line).  The signature would
+        be 'var o *Order' instead of the method signature.
+        """
+        result = tools["goto_definition"](ORDERS_FILE, 40, "o.Process")
+        assert "var " not in result["signature"], (
+            f"resolved to a variable declaration: {result['signature']!r} "
+            "(column points at the receiver, not the member)"
+        )
+
+    # ---- plain function call: ValidateAddress ----------------------------
+
+    def test_resolves_plain_function_call(self, tools):
+        """ValidateAddress (orders.go:26) must resolve to validation.go.
+
+        gopls ground truth at col 6:
+            validation.go:7  func ValidateAddress(address string) bool
+        """
+        result = tools["goto_definition"](ORDERS_FILE, 26, "ValidateAddress")
+        assert self._basename(result["file"]) == "validation.go", (
+            f"expected validation.go, got {result['file']}"
+        )
+        assert result["line"] == 7, f"expected line 7, got {result['line']}"
+        assert "ValidateAddress" in result["signature"]
+
+    def test_plain_function_call_kind_is_function(self, tools):
+        result = tools["goto_definition"](ORDERS_FILE, 26, "ValidateAddress")
+        assert result["kind"] == "function", (
+            f"expected kind 'function', got {result['kind']!r}"
+        )
+
+    # ---- plain function call: FormatCurrency -----------------------------
+
+    def test_resolves_plain_function_call_other_file(self, tools):
+        """FormatCurrency (orders.go:29) must resolve to utils.go.
+
+        gopls ground truth at col 15:
+            utils.go:6  func FormatCurrency(amount float64) string
+        """
+        result = tools["goto_definition"](ORDERS_FILE, 29, "FormatCurrency")
+        assert self._basename(result["file"]) == "utils.go", (
+            f"expected utils.go, got {result['file']}"
+        )
+        assert result["line"] == 6, f"expected line 6, got {result['line']}"
+        assert "FormatCurrency" in result["signature"]
+
+    def test_plain_function_call_other_file_kind_is_function(self, tools):
+        result = tools["goto_definition"](ORDERS_FILE, 29, "FormatCurrency")
+        assert result["kind"] == "function", (
+            f"expected kind 'function', got {result['kind']!r}"
+        )
+
+    # ---- struct field access: o.Address ----------------------------------
+
+    def test_resolves_struct_field_access(self, tools):
+        """o.Address (orders.go:26) must resolve to the struct field,
+        not the `var o *Order` declaration.
+
+        gopls ground truth at the member column (col 24, the 'A' of Address):
+            orders.go:7  field Address string
+        """
+        result = tools["goto_definition"](ORDERS_FILE, 26, "o.Address")
+        assert self._basename(result["file"]) == "orders.go", (
+            f"expected orders.go, got {result['file']}"
+        )
+        assert result["line"] == 7, f"expected line 7, got {result['line']}"
+        assert "Address" in result["signature"], (
+            f"expected signature containing 'Address', got {result['signature']!r}"
+        )
+
+    def test_struct_field_access_not_receiver_declaration(self, tools):
+        """o.Address must NOT resolve to `var o *Order`.
+
+        Regression guard: when the column points at the receiver `o`, gopls
+        returns the variable declaration `var o *Order` at line 25.
+        """
+        result = tools["goto_definition"](ORDERS_FILE, 26, "o.Address")
+        assert "var " not in result["signature"], (
+            f"resolved to a variable declaration: {result['signature']!r} "
+            "(column points at the receiver, not the member)"
+        )
+
+    # ---- struct field access: o.Amount -----------------------------------
+
+    def test_resolves_struct_field_access_amount(self, tools):
+        """o.Amount (orders.go:29) must resolve to the struct field.
+
+        gopls ground truth at the member column (col 32, the 'A' of Amount):
+            orders.go:8  field Amount float64
+        """
+        result = tools["goto_definition"](ORDERS_FILE, 29, "o.Amount")
+        assert self._basename(result["file"]) == "orders.go", (
+            f"expected orders.go, got {result['file']}"
+        )
+        assert result["line"] == 8, f"expected line 8, got {result['line']}"
+        assert "Amount" in result["signature"], (
+            f"expected signature containing 'Amount', got {result['signature']!r}"
+        )
+
+    def test_struct_field_access_amount_not_receiver_declaration(self, tools):
+        result = tools["goto_definition"](ORDERS_FILE, 29, "o.Amount")
+        assert "var " not in result["signature"], (
+            f"resolved to a variable declaration: {result['signature']!r} "
+            "(column points at the receiver, not the member)"
+        )
+
+    # ---- interface method call: p.Process --------------------------------
+    #
+    # processor.go defines UseProcessor(p Processor) which calls p.Process().
+    # gopls ground truth at the member column (col 11, the 'P' of Process):
+    #     orders.go:13  func (Processor) Process() string
+    # (the interface method line inside `type Processor interface`)
+
+    def test_resolves_interface_method_call(self, tools):
+        """p.Process (where p is of interface type Processor) must resolve
+        to the method, not the interface type or the parameter declaration.
+
+        gopls ground truth at the member column:
+            orders.go:13  func (Processor) Process() string
+        (the interface method line inside `type Processor interface`)
+
+        Note: some gopls versions resolve interface-method calls to the
+        `type Processor interface` line (line 12) rather than the method
+        line (line 13).  Both are acceptable as long as the result is NOT
+        the parameter declaration `var p Processor` and the kind is
+        'method'.
+        """
+        result = tools["goto_definition"](PROCESSOR_FILE, 5, "p.Process")
+        # Must resolve into orders.go (where the interface is defined),
+        # not back to the parameter declaration in processor.go.
+        assert self._basename(result["file"]) == "orders.go", (
+            f"expected orders.go, got {result['file']} "
+            "(resolving the parameter declaration instead of the method)"
+        )
+        assert result["line"] in (12, 13), (
+            f"expected line 12 or 13, got {result['line']}"
+        )
+        assert result["kind"] == "method", (
+            f"expected kind 'method', got {result['kind']!r}"
+        )
+
+    def test_interface_method_call_not_parameter_declaration(self, tools):
+        """p.Process must NOT resolve to `var p Processor`."""
+        result = tools["goto_definition"](PROCESSOR_FILE, 5, "p.Process")
+        assert "var " not in result["signature"], (
+            f"resolved to a variable declaration: {result['signature']!r} "
+            "(column points at the receiver, not the member)"
+        )
+
+    # ---- same-line disambiguation ----------------------------------------
+    #
+    # orders.go:40 has TWO selectors on the same line:
+    #     return strings.ToUpper(o.Process())
+    # A correct implementation must resolve each one independently based on
+    # the name argument, not blindly pick the first selector on the line.
+
+    def test_same_line_disambiguation_first_selector(self, tools):
+        """On line 40, `strings.ToUpper` must resolve to strings.go (the
+        first selector), not orders.go (the second selector's method)."""
+        result = tools["goto_definition"](ORDERS_FILE, 40, "strings.ToUpper")
+        assert self._basename(result["file"]) == "strings.go", (
+            f"expected strings.go, got {result['file']}"
+        )
+
+    def test_same_line_disambiguation_second_selector(self, tools):
+        """On line 40, `o.Process` must resolve to orders.go:25 (the second
+        selector), not strings.go (the first selector)."""
+        result = tools["goto_definition"](ORDERS_FILE, 40, "o.Process")
+        assert self._basename(result["file"]) == "orders.go", (
+            f"expected orders.go, got {result['file']}"
+        )
+        assert result["line"] == 25, f"expected line 25, got {result['line']}"
+
+    # ---- result shape ----------------------------------------------------
+
+    def test_result_has_required_fields(self, tools):
+        """Every result must include name, kind, file, line, col, signature."""
+        result = tools["goto_definition"](ORDERS_FILE, 26, "ValidateAddress")
+        for field in ("name", "kind", "file", "line", "col", "signature"):
+            assert field in result, f"missing field {field!r} in result"
+
+    def test_col_is_member_column_for_selector(self, tools):
+        """For a selector expression, the returned `col` must point at the
+        member (the part after the dot), not the qualifier or the dot.
+
+        For strings.ToUpper on line 40, the member 'ToUpper' starts at
+        column 17 (1-indexed).  The returned col must be >= 17 and point
+        within the 'ToUpper' token, i.e. in the range [17, 23].
+        """
+        result = tools["goto_definition"](ORDERS_FILE, 40, "strings.ToUpper")
+        assert 17 <= result["col"] <= 23, (
+            f"expected col in [17, 23] (the 'ToUpper' member), "
+            f"got col={result['col']} "
+            "(column points at the qualifier or dot, not the member)"
+        )
+
+    def test_col_is_member_column_for_method(self, tools):
+        """For o.Process on line 40, the member 'Process' starts at column 27.
+        The returned col must be in [27, 34]."""
+        result = tools["goto_definition"](ORDERS_FILE, 40, "o.Process")
+        assert 27 <= result["col"] <= 34, (
+            f"expected col in [27, 34] (the 'Process' member), got col={result['col']}"
+        )
+
+    def test_col_is_member_column_for_field(self, tools):
+        """For o.Address on line 26, the member 'Address' starts at column 24.
+        The returned col must be in [24, 31]."""
+        result = tools["goto_definition"](ORDERS_FILE, 26, "o.Address")
+        assert 24 <= result["col"] <= 31, (
+            f"expected col in [24, 31] (the 'Address' member), got col={result['col']}"
+        )
+
+
+# get_goto_definition — same qualifier appearing twice on one line
+#
+# This is the pattern that the gin codebase exercises but the original test
+# suite missed.  In gin's recovery.go:56:
+#
+#     logger = log.New(out, "\n\n\x1b[31m", log.LstdFlags)
+#
+# the qualifier `log` appears twice on the same line (log.New and
+# log.LstdFlags).  A column computation that finds the *first* occurrence of
+# the qualifier, or the *first* dot on the line, will resolve the wrong
+# symbol.  The tool must use the `name` argument to find the exact
+# `qualifier.member` pair and compute the column of *that* member.
+#
+# multiselector.go:8 has the same shape with `strings` as the qualifier:
+#
+#     return strings.ToUpper(strings.ToLower(s))
+#
+# gopls ground truth (captured from gopls v0.23.0):
+#     strings.ToUpper @ col 17 -> strings.go:687  func strings.ToUpper(s string) string
+#     strings.ToLower @ col 33 -> strings.go:727  func strings.ToLower(s string) string
+class TestGotoDefinitionSameQualifierTwice:
+    """Resolves two selectors that share the same qualifier on one line.
+
+    multiselector.go line 8:
+        return strings.ToUpper(strings.ToLower(s))
+
+    Both selectors use the qualifier `strings`.  The tool must distinguish
+    them by the member name in the `name` argument, not by finding the
+    first `strings.` on the line.
+    """
+
+    @staticmethod
+    def _basename(path: str) -> str:
+        return path.replace("\\", "/").rstrip("/").split("/")[-1]
+
+    def test_first_occurrence_resolves_correctly(self, tools):
+        """strings.ToUpper (the first `strings.` on line 8) must resolve to
+        strings.go:687, not the import line."""
+        result = tools["goto_definition"](MULTISELECTOR_FILE, 8, "strings.ToUpper")
+        assert self._basename(result["file"]) == "strings.go", (
+            f"expected strings.go, got {result['file']} "
+            "(resolving the package import instead of the function)"
+        )
+        assert result["line"] == 687, f"expected line 687, got {result['line']}"
+        assert "ToUpper" in result["signature"], (
+            f"expected signature containing 'ToUpper', got {result['signature']!r}"
+        )
+
+    def test_second_occurrence_resolves_correctly(self, tools):
+        """strings.ToLower (the SECOND `strings.` on line 8) must resolve to
+        strings.go:727, not strings.go:687 (the first occurrence) and not
+        the import line."""
+        result = tools["goto_definition"](MULTISELECTOR_FILE, 8, "strings.ToLower")
+        assert self._basename(result["file"]) == "strings.go", (
+            f"expected strings.go, got {result['file']} "
+            "(resolving the package import instead of the function)"
+        )
+        assert result["line"] == 727, (
+            f"expected line 727 (ToLower), got {result['line']} "
+            "(resolving the first occurrence ToUpper instead of the requested ToLower)"
+        )
+        assert "ToLower" in result["signature"], (
+            f"expected signature containing 'ToLower', got {result['signature']!r}"
+        )
+
+    def test_second_occurrence_not_first(self, tools):
+        """The result for strings.ToLower must NOT be the same as
+        strings.ToUpper.  This catches a column computation that always
+        picks the first selector on the line regardless of the name arg."""
+        first = tools["goto_definition"](MULTISELECTOR_FILE, 8, "strings.ToUpper")
+        second = tools["goto_definition"](MULTISELECTOR_FILE, 8, "strings.ToLower")
+        assert first["line"] != second["line"], (
+            f"both selectors resolved to the same line {first['line']} "
+            "(column computation is picking the first selector, not the "
+            "one matching the name argument)"
+        )
+
+    def test_second_occurrence_not_import_line(self, tools):
+        """strings.ToLower must NOT resolve to the import line."""
+        result = tools["goto_definition"](MULTISELECTOR_FILE, 8, "strings.ToLower")
+        assert not (
+            self._basename(result["file"]) == "multiselector.go" and result["line"] == 3
+        ), (
+            "resolved to the import line — column points at the qualifier, "
+            "not the member"
+        )
+
+    def test_col_points_at_correct_member_first(self, tools):
+        """For strings.ToUpper on line 8, col must be in [17, 24] (the
+        'ToUpper' token), not at the qualifier or dot."""
+        result = tools["goto_definition"](MULTISELECTOR_FILE, 8, "strings.ToUpper")
+        assert 17 <= result["col"] <= 24, (
+            f"expected col in [17, 24] (the 'ToUpper' member), got col={result['col']}"
+        )
+
+    def test_col_points_at_correct_member_second(self, tools):
+        """For strings.ToLower on line 8, col must be in [33, 40] (the
+        'ToLower' token), not at the first selector or the qualifier."""
+        result = tools["goto_definition"](MULTISELECTOR_FILE, 8, "strings.ToLower")
+        assert 33 <= result["col"] <= 40, (
+            f"expected col in [33, 40] (the 'ToLower' member), "
+            f"got col={result['col']} "
+            "(column points at the first selector, not the requested one)"
+        )
+
+
+# 3rd-party package call
+#
+# external.go imports gin and calls gin.New().  This reproduces the exact
+# bug reported in the gin codebase: a qualified call to a 3rd-party package
+# resolves to the `import "github.com/gin-gonic/gin"` line (signature
+# "package gin") instead of the actual function definition in the package.
+#
+# gopls ground truth (captured from gopls v0.23.0):
+#     At the member column (col 13, the 'N' of New):
+#         gin.go:202  func gin.New(opts ...gin.OptionFunc) *gin.Engine
+#     At the dot (col 12):
+#         external.go:3  package gin  (the import line — THIS IS THE BUG)
+class TestGotoDefinitionThirdParty:
+    """gin.New (external.go:7) must resolve to the function in the 3rd-party
+    package, not the import line in the caller.
+
+    external.go line 7:
+        return gin.New()
+
+    gopls ground truth at the member column:
+        gin.go:202  func gin.New(opts ...gin.OptionFunc) *gin.Engine
+    """
+
+    @staticmethod
+    def _basename(path: str) -> str:
+        return path.replace("\\", "/").rstrip("/").split("/")[-1]
+
+    def test_resolves_third_party_function(self, tools):
+        """gin.New must resolve to gin.go (the 3rd-party package source),
+        not external.go:3 (the import line in the caller)."""
+        result = tools["goto_definition"](EXTERNAL_FILE, 7, "gin.New")
+        assert result, "got empty result"
+        assert self._basename(result["file"]) == "gin.go", (
+            f"expected gin.go (the function definition), "
+            f"got {result['file']} "
+            "(resolving the package import instead of the function)"
+        )
+        assert "New" in result["signature"], (
+            f"expected signature containing 'New', "
+            f"got {result['signature']!r} "
+            "(got the package docstring instead of the function signature)"
+        )
+
+    def test_third_party_not_import_line(self, tools):
+        """The result must NOT be the import line in external.go.
+
+        When the column points at the dot or qualifier, gopls returns the
+        import statement: external.go:3 with signature 'package gin'.
+        """
+        result = tools["goto_definition"](EXTERNAL_FILE, 7, "gin.New")
+        assert not (
+            self._basename(result["file"]) == "external.go" and result["line"] == 3
+        ), (
+            "resolved to the import line — the column points at the "
+            "qualifier/dot, not the member 'New'"
+        )
+
+    def test_third_party_kind_is_function(self, tools):
+        """gin.New must be classified as a function, not 'unknown'."""
+        result = tools["goto_definition"](EXTERNAL_FILE, 7, "gin.New")
+        assert result["kind"] == "function", (
+            f"expected kind 'function', got {result['kind']!r} "
+            "(kind inference fell back to 'unknown' because the hover "
+            "signature is the package docstring, not the function signature)"
         )

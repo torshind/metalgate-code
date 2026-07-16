@@ -51,7 +51,7 @@ async def _serve_agent() -> None:
         if os.environ.get("SANDBOX_IMAGE"):
             image = os.environ["SANDBOX_IMAGE"]
         elif Path(cwd, "go.mod").exists():
-            image = "go"
+            image = "golang"
         else:
             image = "python"
 
