@@ -1117,6 +1117,7 @@ async def test_agent_uses_context_tools(run_sh: Path) -> None:
             In the directory {dst}, there is a Go monorepo project with packages
             under private/service/api, private/service/internal/shared, public/client,
             and e2e-tests/suite.
+            You run in a sandbox, so to make the path translation work, you need to pass the full path to tools.
             I need you to do a full cross-reference analysis of the function 'ToContext':
             1. Use find_symbol to locate 'ToContext'.
             2. Use get_file_outline on context.go to see all symbols in that file.

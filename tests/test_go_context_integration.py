@@ -279,6 +279,7 @@ async def test_agent_uses_context_tools(run_sh: Path) -> None:
             run_sh,
             f"""
             In the directory {dst}, there is a Go project with orders.go, validation.go, and utils.go.
+            You run in a sandbox, so to make the path translation work, you need to pass the full path to tools.
             I need you to do a full cross-reference analysis of the function 'ValidateAddress':
             1. Use find_symbol to locate 'ValidateAddress'.
             2. Use get_file_outline on validation.go to see all symbols in that file.

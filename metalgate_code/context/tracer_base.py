@@ -473,7 +473,7 @@ class Tracer(ABC):
         returned unchanged.
         """
         if self._is_sandbox:
-            return self.ms._resolve_guest_path(file)
+            return self.ms._to_guest_path(file)
         return file
 
     def _to_host_path(self, path: str) -> str:

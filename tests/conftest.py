@@ -72,30 +72,16 @@ class RecordingClient(Client):
 
     # Path translation
 
-    def _to_host_path(self, path: str) -> str:
-        """Translate a sandbox path (``/workspace/...``) to a host path."""
-        p = str(path)
-        if p == SANDBOX_WORKDIR:
-            return str(self.temp_dir)
-        prefix = SANDBOX_WORKDIR + "/"
-        if p.startswith(prefix):
-            return str(self.temp_dir / p[len(prefix) :])
-        return p
+    def _to_host_path(self, input: str) -> str:
+        """Replace /workspace prefix with temp_dir."""
+        p = Path(input)
+        workspace = Path(SANDBOX_WORKDIR)
+        if p.is_relative_to(workspace):
+            p = Path(self.temp_dir) / p.relative_to(workspace)
+        return str(p)
 
-    def _to_sandbox_path(self, path: str) -> str:
-        """Translate a host path (``temp_dir/...``) to a sandbox path."""
-        p = str(path)
-        host_dir = str(self.temp_dir)
-        if p == host_dir:
-            return SANDBOX_WORKDIR
-        prefix = host_dir + "/"
-        if p.startswith(prefix):
-            return SANDBOX_WORKDIR + "/" + p[len(prefix) :]
-        return p
-
-    def _to_sandbox_prompt(self, prompt: str) -> str:
-        """Replace host ``temp_dir`` references in a prompt with the sandbox path."""
-        return prompt.replace(str(self.temp_dir), SANDBOX_WORKDIR)
+    def _to_guest_path(self, input: str) -> str:
+        return input.replace(str(self.temp_dir), SANDBOX_WORKDIR)
 
     def __enter__(self) -> Self:
         return self
@@ -299,7 +285,7 @@ async def run_agent(
         await asyncio.wait_for(
             conn.prompt(
                 session_id=session.session_id,
-                prompt=[text_block(client._to_sandbox_prompt(prompt))],
+                prompt=[text_block(client._to_guest_path(prompt))],
             ),
             timeout=timeout,
         )
