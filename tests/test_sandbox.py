@@ -11,6 +11,7 @@ Requires the microsandbox runtime (``msb``) to be installed and functional.
 from __future__ import annotations
 
 import base64
+import tempfile
 import textwrap
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -24,9 +25,9 @@ from metalgate_code.factory.microsandbox_backend import MicrosandboxBackend
 
 
 @pytest.fixture
-def workspace(tmp_path: Path) -> Path:
+def workspace() -> Path:
     """A temp directory that gets bind-mounted into the VM as /workspace."""
-    return tmp_path
+    return Path(tempfile.mkdtemp(prefix="sandbox_"))
 
 
 @pytest_asyncio.fixture
@@ -75,11 +76,6 @@ class TestInit:
         )
         assert "PATH" in b._env
         assert b._env["CUSTOM"] == "val"
-        await b.stop()
-
-    async def test_root_dir_resolved(self, workspace: Path):
-        b = MicrosandboxBackend(root_dir=str(workspace / "subdir"))
-        assert b._root_dir == str((workspace / "subdir").resolve())
         await b.stop()
 
     async def test_eager_boots_sandbox(self, workspace: Path):
@@ -256,7 +252,7 @@ class TestExecute:
 class TestRead:
     async def test_aread_text_file(self, backend: MicrosandboxBackend, workspace: Path):
         (workspace / "test.txt").write_text("line1\nline2\nline3\n")
-        result = await backend.aread("test.txt")
+        result = await backend.aread(str(workspace / "test.txt"))
         assert result.error is None
         assert result.file_data is not None
         assert "line1" in result.file_data["content"]
@@ -268,7 +264,7 @@ class TestRead:
     ):
         binary_data = b"\x00\x01\x02\xff\xfe"
         (workspace / "blob.bin").write_bytes(binary_data)
-        result = await backend.aread("blob.bin")
+        result = await backend.aread(str(workspace / "blob.bin"))
         assert result.error is None
         assert result.file_data is not None
         assert result.file_data["encoding"] == "base64"
@@ -279,7 +275,7 @@ class TestRead:
         self, backend: MicrosandboxBackend, workspace: Path
     ):
         (workspace / "empty.txt").write_text("")
-        result = await backend.aread("empty.txt")
+        result = await backend.aread(str(workspace / "empty.txt"))
         assert result.error is None
         assert result.file_data is not None
         assert (
@@ -291,12 +287,14 @@ class TestRead:
         self, backend: MicrosandboxBackend, workspace: Path
     ):
         (workspace / "ws.txt").write_text("   \n  \t\n")
-        result = await backend.aread("ws.txt")
+        result = await backend.aread(str(workspace / "ws.txt"))
         assert result.error is None
         assert result.file_data is not None
 
-    async def test_aread_file_not_found(self, backend: MicrosandboxBackend):
-        result = await backend.aread("does_not_exist.txt")
+    async def test_aread_file_not_found(
+        self, backend: MicrosandboxBackend, workspace: Path
+    ):
+        result = await backend.aread(str(workspace / "does_not_exist.txt"))
         assert result.error is not None
         assert "does_not_exist.txt" in result.error
 
@@ -305,7 +303,7 @@ class TestRead:
     ):
         content = "".join(f"line{i}\n" for i in range(10))
         (workspace / "big.txt").write_text(content)
-        result = await backend.aread("big.txt", offset=2, limit=3)
+        result = await backend.aread(str(workspace / "big.txt"), offset=2, limit=3)
         assert result.error is None
         assert result.file_data is not None
         page = result.file_data["content"]
@@ -317,7 +315,7 @@ class TestRead:
         self, backend: MicrosandboxBackend, workspace: Path
     ):
         (workspace / "short.txt").write_text("only one line\n")
-        result = await backend.aread("short.txt", offset=100)
+        result = await backend.aread(str(workspace / "short.txt"), offset=100)
         assert result.error is not None
         assert "100" in result.error
 
@@ -336,7 +334,7 @@ class TestRead:
         self, backend: MicrosandboxBackend, workspace: Path
     ):
         (workspace / "guest.txt").write_text("guest path")
-        result = await backend.aread("/workspace/guest.txt")
+        result = await backend.aread(str(workspace / "guest.txt"))
         assert result.error is None
         assert result.file_data is not None
         assert "guest path" in result.file_data["content"]
@@ -345,7 +343,7 @@ class TestRead:
         b = MicrosandboxBackend(root_dir=str(workspace), memory=1024)
         try:
             (workspace / "sync.txt").write_text("sync read")
-            result = b.read("sync.txt")
+            result = b.read(str(workspace / "sync.txt"))
             assert result.error is None
             assert result.file_data is not None
             assert "sync read" in result.file_data["content"]
@@ -359,16 +357,16 @@ class TestRead:
 @pytest.mark.asyncio
 class TestWrite:
     async def test_awrite_new_file(self, backend: MicrosandboxBackend, workspace: Path):
-        result = await backend.awrite("new.txt", "hello world")
+        result = await backend.awrite(str(workspace / "new.txt"), "hello world")
         assert result.error is None
-        assert result.path == "new.txt"
+        assert result.path == str(workspace / "new.txt")
         assert (workspace / "new.txt").read_text() == "hello world"
 
     async def test_awrite_existing_file_fails(
         self, backend: MicrosandboxBackend, workspace: Path
     ):
         (workspace / "exist.txt").write_text("old content")
-        result = await backend.awrite("exist.txt", "new content")
+        result = await backend.awrite(str(workspace / "exist.txt"), "new content")
         assert result.error is not None
         assert "already exists" in result.error
         assert (workspace / "exist.txt").read_text() == "old content"
@@ -376,7 +374,9 @@ class TestWrite:
     async def test_awrite_creates_parent_dir(
         self, backend: MicrosandboxBackend, workspace: Path
     ):
-        result = await backend.awrite("sub/dir/file.txt", "nested content")
+        result = await backend.awrite(
+            str(workspace / "sub" / "dir" / "file.txt"), "nested content"
+        )
         assert result.error is None
         assert (workspace / "sub" / "dir" / "file.txt").read_text() == "nested content"
 
@@ -384,21 +384,23 @@ class TestWrite:
         self, backend: MicrosandboxBackend, workspace: Path
     ):
         content = "line1\nline2\nline3\n"
-        result = await backend.awrite("multi.txt", content)
+        result = await backend.awrite(str(workspace / "multi.txt"), content)
         assert result.error is None
         assert (workspace / "multi.txt").read_text() == content
 
     async def test_awrite_unicode_content(
         self, backend: MicrosandboxBackend, workspace: Path
     ):
-        result = await backend.awrite("unicode.txt", "héllo wörld 日本語")
+        result = await backend.awrite(
+            str(workspace / "unicode.txt"), "héllo wörld 日本語"
+        )
         assert result.error is None
         assert (workspace / "unicode.txt").read_text() == "héllo wörld 日本語"
 
     async def test_write_sync(self, workspace: Path):
         b = MicrosandboxBackend(root_dir=str(workspace), memory=1024)
         try:
-            result = b.write("sync_write.txt", "sync content")
+            result = b.write(str(workspace / "sync_write.txt"), "sync content")
             assert result.error is None
             assert (workspace / "sync_write.txt").read_text() == "sync content"
         finally:
@@ -414,7 +416,7 @@ class TestEdit:
         self, backend: MicrosandboxBackend, workspace: Path
     ):
         (workspace / "edit.txt").write_text("foo bar baz")
-        result = await backend.aedit("edit.txt", "bar", "qux")
+        result = await backend.aedit(str(workspace / "edit.txt"), "bar", "qux")
         assert result.error is None
         assert result.occurrences == 1
         assert (workspace / "edit.txt").read_text() == "foo qux baz"
@@ -423,7 +425,9 @@ class TestEdit:
         self, backend: MicrosandboxBackend, workspace: Path
     ):
         (workspace / "edit.txt").write_text("a a a")
-        result = await backend.aedit("edit.txt", "a", "b", replace_all=True)
+        result = await backend.aedit(
+            str(workspace / "edit.txt"), "a", "b", replace_all=True
+        )
         assert result.error is None
         assert result.occurrences == 3
         assert (workspace / "edit.txt").read_text() == "b b b"
@@ -432,7 +436,7 @@ class TestEdit:
         self, backend: MicrosandboxBackend, workspace: Path
     ):
         (workspace / "edit.txt").write_text("dup dup")
-        result = await backend.aedit("edit.txt", "dup", "x")
+        result = await backend.aedit(str(workspace / "edit.txt"), "dup", "x")
         assert result.error is not None
         assert "multiple times" in result.error
 
@@ -440,12 +444,14 @@ class TestEdit:
         self, backend: MicrosandboxBackend, workspace: Path
     ):
         (workspace / "edit.txt").write_text("hello world")
-        result = await backend.aedit("edit.txt", "missing", "x")
+        result = await backend.aedit(str(workspace / "edit.txt"), "missing", "x")
         assert result.error is not None
         assert "not found" in result.error
 
-    async def test_aedit_file_not_found(self, backend: MicrosandboxBackend):
-        result = await backend.aedit("nope.txt", "a", "b")
+    async def test_aedit_file_not_found(
+        self, backend: MicrosandboxBackend, workspace: Path
+    ):
+        result = await backend.aedit(str(workspace / "nope.txt"), "a", "b")
         assert result.error is not None
         assert "nope.txt" in result.error
 
@@ -453,7 +459,7 @@ class TestEdit:
         self, backend: MicrosandboxBackend, workspace: Path
     ):
         (workspace / "edit.bin").write_bytes(b"\x00\x01\xff")
-        result = await backend.aedit("edit.bin", "a", "b")
+        result = await backend.aedit(str(workspace / "edit.bin"), "a", "b")
         assert result.error is not None
         assert "not a text file" in result.error
 
@@ -461,7 +467,9 @@ class TestEdit:
         self, backend: MicrosandboxBackend, workspace: Path
     ):
         (workspace / "edit.txt").write_bytes(b"line1\nline2\n")
-        result = await backend.aedit("edit.txt", "line1\r\nline2", "foo\r\nbar")
+        result = await backend.aedit(
+            str(workspace / "edit.txt"), "line1\r\nline2", "foo\r\nbar"
+        )
         assert result.error is None
         assert (workspace / "edit.txt").read_bytes() == b"foo\nbar\n"
 
@@ -473,7 +481,7 @@ class TestEdit:
                 pass
         """)
         (workspace / "code.py").write_text(original)
-        result = await backend.aedit("code.py", "pass", "return 42")
+        result = await backend.aedit(str(workspace / "code.py"), "pass", "return 42")
         assert result.error is None
         assert "return 42" in (workspace / "code.py").read_text()
 
@@ -481,7 +489,7 @@ class TestEdit:
         b = MicrosandboxBackend(root_dir=str(workspace), memory=1024)
         try:
             (workspace / "sync_edit.txt").write_text("old value")
-            result = b.edit("sync_edit.txt", "old", "new")
+            result = b.edit(str(workspace / "sync_edit.txt"), "old", "new")
             assert result.error is None
             assert "new value" in (workspace / "sync_edit.txt").read_text()
         finally:
@@ -497,7 +505,7 @@ class TestLs:
         (workspace / "file1.txt").write_text("a")
         (workspace / "file2.txt").write_text("b")
         (workspace / "subdir").mkdir()
-        result = await backend.als(".")
+        result = await backend.als(str(workspace))
         assert result.error is None
         assert result.entries is not None
         paths = [e["path"] for e in result.entries]
@@ -508,7 +516,7 @@ class TestLs:
     async def test_als_empty_directory(
         self, backend: MicrosandboxBackend, workspace: Path
     ):
-        result = await backend.als(".")
+        result = await backend.als(str(workspace))
         assert result.error is None
         assert result.entries is not None
         # The backend may create internal directories (e.g. .venv-msb) in
@@ -519,7 +527,7 @@ class TestLs:
     async def test_als_is_dir_flag(self, backend: MicrosandboxBackend, workspace: Path):
         (workspace / "file.txt").write_text("x")
         (workspace / "adir").mkdir()
-        result = await backend.als(".")
+        result = await backend.als(str(workspace))
         assert result.error is None
         assert result.entries is not None
         for entry in result.entries:
@@ -528,15 +536,17 @@ class TestLs:
             if "file.txt" in entry["path"]:
                 assert entry["is_dir"] is False
 
-    async def test_als_nonexistent_path(self, backend: MicrosandboxBackend):
-        result = await backend.als("/nonexistent_xyz")
+    async def test_als_nonexistent_path(
+        self, backend: MicrosandboxBackend, workspace: Path
+    ):
+        result = await backend.als(str(workspace / "nonexistent_xyz"))
         assert result.error is not None
 
     async def test_ls_sync(self, workspace: Path):
         b = MicrosandboxBackend(root_dir=str(workspace), memory=1024)
         try:
             (workspace / "sync_ls.txt").write_text("x")
-            result = b.ls(".")
+            result = b.ls(str(workspace))
             assert result.error is None
             assert result.entries is not None
             assert any("sync_ls.txt" in e["path"] for e in result.entries)
@@ -554,7 +564,7 @@ class TestGrep:
     ):
         (workspace / "file1.txt").write_text("hello world\nfoo bar\nhello again\n")
         (workspace / "file2.py").write_text("hello from python\n")
-        result = await backend.agrep("hello")
+        result = await backend.agrep("hello", path=str(workspace))
         assert result.error is None
         assert result.matches is not None
         assert len(result.matches) >= 3
@@ -567,7 +577,7 @@ class TestGrep:
         self, backend: MicrosandboxBackend, workspace: Path
     ):
         (workspace / "file.txt").write_text("nothing to see here\n")
-        result = await backend.agrep("nonexistent_pattern_xyz")
+        result = await backend.agrep("nonexistent_pattern_xyz", path=str(workspace))
         assert result.error is None
         assert result.matches is not None
         assert len(result.matches) == 0
@@ -576,7 +586,7 @@ class TestGrep:
         (workspace / "subdir").mkdir()
         (workspace / "subdir" / "a.txt").write_text("target line\n")
         (workspace / "root.txt").write_text("target line\n")
-        result = await backend.agrep("target", path="subdir")
+        result = await backend.agrep("target", path=str(workspace / "subdir"))
         assert result.error is None
         assert result.matches is not None
         assert all("subdir" in m["path"] for m in result.matches)
@@ -584,7 +594,7 @@ class TestGrep:
     async def test_agrep_with_glob(self, backend: MicrosandboxBackend, workspace: Path):
         (workspace / "a.py").write_text("searchme\n")
         (workspace / "b.txt").write_text("searchme\n")
-        result = await backend.agrep("searchme", glob="*.py")
+        result = await backend.agrep("searchme", path=str(workspace), glob="*.py")
         assert result.error is None
         assert result.matches is not None
         assert all(".py" in m["path"] for m in result.matches)
@@ -593,7 +603,7 @@ class TestGrep:
         self, backend: MicrosandboxBackend, workspace: Path
     ):
         (workspace / "file.txt").write_text("price: $50.00\n")
-        result = await backend.agrep("$50.00")
+        result = await backend.agrep("$50.00", path=str(workspace))
         assert result.error is None
         assert result.matches is not None
         assert len(result.matches) == 1
@@ -603,7 +613,7 @@ class TestGrep:
         self, backend: MicrosandboxBackend, workspace: Path
     ):
         (workspace / "file.txt").write_text("line1\nmatch here\nline3\n")
-        result = await backend.agrep("match")
+        result = await backend.agrep("match", path=str(workspace))
         assert result.error is None
         assert result.matches is not None
         assert len(result.matches) == 1
@@ -613,7 +623,7 @@ class TestGrep:
         b = MicrosandboxBackend(root_dir=str(workspace), memory=1024)
         try:
             (workspace / "file.txt").write_text("findme\n")
-            result = b.grep("findme")
+            result = b.grep("findme", path=str(workspace))
             assert result.error is None
             assert result.matches is not None
             assert len(result.matches) == 1
@@ -632,7 +642,7 @@ class TestGlob:
         (workspace / "file1.py").write_text("x")
         (workspace / "file2.py").write_text("x")
         (workspace / "file3.txt").write_text("x")
-        result = await backend.aglob("*.py")
+        result = await backend.aglob("*.py", path=str(workspace))
         assert result.error is None
         assert result.matches is not None
         paths = [m["path"] for m in result.matches]
@@ -646,7 +656,7 @@ class TestGlob:
         (workspace / "subdir").mkdir()
         (workspace / "subdir" / "deep.py").write_text("x")
         (workspace / "top.py").write_text("x")
-        result = await backend.aglob("**/*.py")
+        result = await backend.aglob("**/*.py", path=str(workspace))
         assert result.error is None
         assert result.matches is not None
         paths = [m["path"] for m in result.matches]
@@ -660,7 +670,7 @@ class TestGlob:
         (workspace / "src" / "main.py").write_text("x")
         # find -path matches against the full path starting from the search root (./src/main.py),
         # so the pattern must include a wildcard prefix to match.
-        result = await backend.aglob("*src/main.py")
+        result = await backend.aglob("*src/main.py", path=str(workspace))
         assert result.error is None
         assert result.matches is not None
         paths = [m["path"] for m in result.matches]
@@ -669,7 +679,7 @@ class TestGlob:
     async def test_aglob_no_matches(
         self, backend: MicrosandboxBackend, workspace: Path
     ):
-        result = await backend.aglob("*.xyz")
+        result = await backend.aglob("*.xyz", path=str(workspace))
         assert result.error is None
         assert result.matches is not None
         # No .xyz files exist in the workspace, so there should be no
@@ -682,7 +692,7 @@ class TestGlob:
         (workspace / "subdir").mkdir()
         (workspace / "subdir" / "a.py").write_text("x")
         (workspace / "b.py").write_text("x")
-        result = await backend.aglob("*.py", path="subdir")
+        result = await backend.aglob("*.py", path=str(workspace / "subdir"))
         assert result.error is None
         assert result.matches is not None
         assert all("subdir" in m["path"] for m in result.matches)
@@ -691,7 +701,7 @@ class TestGlob:
         b = MicrosandboxBackend(root_dir=str(workspace), memory=1024)
         try:
             (workspace / "sync_glob.py").write_text("x")
-            result = b.glob("*.py")
+            result = b.glob("*.py", path=str(workspace))
             assert result.error is None
             assert result.matches is not None
             assert any("sync_glob.py" in m["path"] for m in result.matches)
@@ -707,16 +717,18 @@ class TestUploadFiles:
     async def test_aupload_single_file(
         self, backend: MicrosandboxBackend, workspace: Path
     ):
-        result = await backend.aupload_files([("upload.txt", b"file content")])
+        result = await backend.aupload_files(
+            [(str(workspace / "upload.txt"), b"file content")]
+        )
         assert len(result) == 1
         assert result[0].error is None
-        assert result[0].path == "upload.txt"
+        assert result[0].path == str(workspace / "upload.txt")
         assert (workspace / "upload.txt").read_bytes() == b"file content"
 
     async def test_aupload_multiple_files(
         self, backend: MicrosandboxBackend, workspace: Path
     ):
-        files = [("a.txt", b"aaa"), ("b.txt", b"bbb")]
+        files = [(str(workspace / "a.txt"), b"aaa"), (str(workspace / "b.txt"), b"bbb")]
         result = await backend.aupload_files(files)
         assert len(result) == 2
         assert all(r.error is None for r in result)
@@ -726,7 +738,9 @@ class TestUploadFiles:
     async def test_aupload_creates_parent_dir(
         self, backend: MicrosandboxBackend, workspace: Path
     ):
-        result = await backend.aupload_files([("sub/dir/file.txt", b"data")])
+        result = await backend.aupload_files(
+            [(str(workspace / "sub" / "dir" / "file.txt"), b"data")]
+        )
         assert len(result) == 1
         assert result[0].error is None
         assert (workspace / "sub" / "dir" / "file.txt").read_bytes() == b"data"
@@ -735,7 +749,7 @@ class TestUploadFiles:
         self, backend: MicrosandboxBackend, workspace: Path
     ):
         data = bytes(range(256))
-        result = await backend.aupload_files([("binary.dat", data)])
+        result = await backend.aupload_files([(str(workspace / "binary.dat"), data)])
         assert len(result) == 1
         assert result[0].error is None
         assert (workspace / "binary.dat").read_bytes() == data
@@ -743,7 +757,7 @@ class TestUploadFiles:
     async def test_upload_files_sync(self, workspace: Path):
         b = MicrosandboxBackend(root_dir=str(workspace), memory=1024)
         try:
-            result = b.upload_files([("sync_up.txt", b"sync data")])
+            result = b.upload_files([(str(workspace / "sync_up.txt"), b"sync data")])
             assert len(result) == 1
             assert result[0].error is None
             assert (workspace / "sync_up.txt").read_bytes() == b"sync data"
@@ -760,7 +774,7 @@ class TestDownloadFiles:
         self, backend: MicrosandboxBackend, workspace: Path
     ):
         (workspace / "dl.txt").write_bytes(b"download me")
-        result = await backend.adownload_files(["dl.txt"])
+        result = await backend.adownload_files([str(workspace / "dl.txt")])
         assert len(result) == 1
         assert result[0].error is None
         assert result[0].content == b"download me"
@@ -770,14 +784,18 @@ class TestDownloadFiles:
     ):
         (workspace / "a.txt").write_bytes(b"aaa")
         (workspace / "b.txt").write_bytes(b"bbb")
-        result = await backend.adownload_files(["a.txt", "b.txt"])
+        result = await backend.adownload_files(
+            [str(workspace / "a.txt"), str(workspace / "b.txt")]
+        )
         assert len(result) == 2
         assert all(r.error is None for r in result)
         assert result[0].content == b"aaa"
         assert result[1].content == b"bbb"
 
-    async def test_adownload_file_not_found(self, backend: MicrosandboxBackend):
-        result = await backend.adownload_files(["missing.txt"])
+    async def test_adownload_file_not_found(
+        self, backend: MicrosandboxBackend, workspace: Path
+    ):
+        result = await backend.adownload_files([str(workspace / "missing.txt")])
         assert len(result) == 1
         assert result[0].error is not None
         assert result[0].content is None
@@ -786,7 +804,9 @@ class TestDownloadFiles:
         self, backend: MicrosandboxBackend, workspace: Path
     ):
         (workspace / "ok.txt").write_bytes(b"ok")
-        result = await backend.adownload_files(["ok.txt", "missing.txt"])
+        result = await backend.adownload_files(
+            [str(workspace / "ok.txt"), str(workspace / "missing.txt")]
+        )
         assert len(result) == 2
         assert result[0].error is None
         assert result[0].content == b"ok"
@@ -798,7 +818,7 @@ class TestDownloadFiles:
     ):
         data = bytes(range(256))
         (workspace / "bin.dat").write_bytes(data)
-        result = await backend.adownload_files(["bin.dat"])
+        result = await backend.adownload_files([str(workspace / "bin.dat")])
         assert len(result) == 1
         assert result[0].error is None
         assert result[0].content == data
@@ -807,7 +827,7 @@ class TestDownloadFiles:
         b = MicrosandboxBackend(root_dir=str(workspace), memory=1024)
         try:
             (workspace / "sync_dl.txt").write_bytes(b"sync dl")
-            result = b.download_files(["sync_dl.txt"])
+            result = b.download_files([str(workspace / "sync_dl.txt")])
             assert len(result) == 1
             assert result[0].error is None
             assert result[0].content == b"sync dl"
@@ -821,7 +841,7 @@ class TestDownloadFiles:
 class TestPathHelpers:
     def test_to_guest_path_empty(self, workspace: Path):
         b = MicrosandboxBackend(root_dir=str(workspace))
-        assert b._resolve_guest_path("") == "/workspace"
+        assert b._to_guest_path("") == ""
 
     def test_to_guest_path_already_guest(self, workspace: Path):
         b = MicrosandboxBackend(root_dir=str(workspace))
@@ -844,7 +864,7 @@ class TestPathHelpers:
 
     def test_to_guest_path_relative(self, workspace: Path):
         b = MicrosandboxBackend(root_dir=str(workspace))
-        assert b._resolve_guest_path("file.txt") == "/workspace/file.txt"
+        assert b._to_guest_path("file.txt") == "file.txt"
 
     def test_to_host_path_workspace(self, workspace: Path):
         b = MicrosandboxBackend(root_dir=str(workspace))

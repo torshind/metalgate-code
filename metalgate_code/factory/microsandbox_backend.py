@@ -611,7 +611,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         sb = await self._ensure_sandbox()
 
         # Resolve to an absolute guest path for the filesystem API
-        guest_path = self._resolve_guest_path(file_path)
+        guest_path = self._to_guest_path(file_path)
 
         try:
             raw = await self._fs(sb, sb.fs.read(guest_path))
@@ -662,7 +662,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
     ) -> WriteResult:
         """Create a new file, failing if it already exists."""
         sb = await self._ensure_sandbox()
-        guest_path = self._resolve_guest_path(file_path)
+        guest_path = self._to_guest_path(file_path)
 
         # Check if file already exists
         try:
@@ -714,7 +714,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         replacement locally, and writes the result back.
         """
         sb = await self._ensure_sandbox()
-        guest_path = self._resolve_guest_path(file_path)
+        guest_path = self._to_guest_path(file_path)
 
         try:
             raw = await self._fs(sb, sb.fs.read(guest_path))
@@ -769,7 +769,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
     async def als(self, path: str) -> LsResult:
         """List directory contents with metadata."""
         sb = await self._ensure_sandbox()
-        guest_path = self._resolve_guest_path(path)
+        guest_path = self._to_guest_path(path)
 
         try:
             entries = await self._fs(sb, sb.fs.list(guest_path))
@@ -895,7 +895,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         results: list[FileUploadResponse] = []
 
         for path, content in files:
-            guest_path = self._resolve_guest_path(path)
+            guest_path = self._to_guest_path(path)
 
             # Ensure parent directory exists
             parent = str(Path(guest_path).parent)
@@ -926,7 +926,7 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         results: list[FileDownloadResponse] = []
 
         for path in paths:
-            guest_path = self._resolve_guest_path(path)
+            guest_path = self._to_guest_path(path)
             try:
                 content = await self._fs(sb, sb.fs.read(guest_path))
                 results.append(
@@ -958,26 +958,6 @@ class MicrosandboxBackend(SandboxBackendProtocol):
     def _to_guest_path(self, input: str) -> str:
         """Replace root_dir with /workspace."""
         return input.replace(self._root_dir, SANDBOX_WORKDIR)
-
-    def _resolve_guest_path(self, input: str) -> str:
-        """Convert a path to an absolute guest path for the filesystem API.
-
-        Handles three input forms:
-        - Host absolute path (contains ``root_dir``) → replaced with ``/workspace``.
-        - Already a guest path (starts with ``/workspace``) → passed through.
-        - Relative or slash-prefixed project path (e.g. ``metalgate_code/...``
-          or ``/metalgate_code/...`` as produced by built-in tools) →
-          resolved under ``/workspace``.
-        """
-        result = self._to_guest_path(input)
-        if not result.startswith("/"):
-            result = str(Path(SANDBOX_WORKDIR) / result)
-        elif not result.startswith(SANDBOX_WORKDIR):
-            # Absolute path that isn't under /workspace and wasn't a host
-            # path — likely a project-relative path with a leading slash
-            # (e.g. from built-in read_file).  Re-anchor under /workspace.
-            result = str(Path(SANDBOX_WORKDIR) / result.lstrip("/"))
-        return result
 
     def _to_host_path(self, input: str) -> str:
         """Replace /workspace prefix with root_dir."""

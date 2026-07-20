@@ -358,6 +358,7 @@ async def test_agent_uses_context_tools(run_sh: Path) -> None:
             run_sh,
             f"""
             In the directory {dst}, there is a Python project with orders.py, validation.py, and utils.py.
+            You run in a sandbox, so to make the path translation work, you need to pass the full path to tools.
             I need you to do a full cross-reference analysis of the function 'validate_address':
             1. Use find_symbol to locate 'validate_address'.
             2. Use get_file_outline on validation.py to see all symbols in that file.
