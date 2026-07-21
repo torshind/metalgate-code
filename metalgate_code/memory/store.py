@@ -8,10 +8,10 @@ from typing import Any
 
 from mem0 import AsyncMemory
 
+from metalgate_code.helpers.paths import get_memory_data_dir
 from metalgate_code.memory.config import (
     DEFAULT_EPISODIC_LIMIT,
 )
-from metalgate_code.helpers.paths import get_memory_data_dir
 from metalgate_code.models.provider import get_mem0_config
 
 # Singleton cache: (cwd, user_id) -> MemoryStore
@@ -94,11 +94,16 @@ class MemoryStore:
         Returns:
             Search results dict with 'results' key.
         """
+        filters: dict[str, Any] = {
+            "user_id": self.user_id,
+            "agent_id": agent_id,
+        }
+        if project_scoped:
+            filters["run_id"] = self.project_id
+
         return await self.store.search(
             query=query,
-            user_id=self.user_id,
-            agent_id=agent_id,
-            run_id=self.project_id if project_scoped else None,
+            filters=filters,
             limit=limit,
         )
 
@@ -117,10 +122,15 @@ class MemoryStore:
         Returns:
             Results dict with 'results' key.
         """
+        filters: dict[str, Any] = {
+            "user_id": self.user_id,
+            "agent_id": agent_id,
+        }
+        if project_scoped:
+            filters["run_id"] = self.project_id
+
         return await self.store.get_all(
-            user_id=self.user_id,
-            agent_id=agent_id,
-            run_id=self.project_id if project_scoped else None,
+            filters=filters,
         )
 
     async def add(

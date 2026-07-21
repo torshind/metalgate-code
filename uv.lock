@@ -2094,9 +2094,10 @@ wheels = [
 
 [[package]]
 name = "mem0ai"
-version = "1.0.11"
+version = "2.0.12"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "httpx" },
     { name = "openai" },
     { name = "posthog" },
     { name = "protobuf" },
@@ -2105,9 +2106,9 @@ dependencies = [
     { name = "qdrant-client" },
     { name = "sqlalchemy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/91/1e/2f8a8cc4b8e7f6126f3367d27dc65eac5cd4ceb854888faa3a8f62a2c0a0/mem0ai-1.0.11.tar.gz", hash = "sha256:ddb803bedc22bd514606d262407782e88df929f6991b59f6972fb8a25cc06001", size = 201758, upload-time = "2026-04-06T11:31:43.695Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/dd/41/4abe2bc4c369b88680c981e0ae81a12d7328024549c577fb929be9e4db5d/mem0ai-2.0.12.tar.gz", hash = "sha256:626c001faee2edd3733cbda7105571ed4a514c7c044bfe8f64fd48aa1b34dd7a", size = 240186, upload-time = "2026-07-13T16:49:53.137Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b8/b5/f822c94e1b901f8a700af134c2473646de9a7db26364566f6a72d527d235/mem0ai-1.0.11-py3-none-any.whl", hash = "sha256:bcf4d678dc0a4d4e8eccaebe05562eae022fcdc825a0e3095d02f28cf61a5b6d", size = 297138, upload-time = "2026-04-06T11:31:41.716Z" },
+    { url = "https://files.pythonhosted.org/packages/db/6e/ae30d5fbadd09f4317ad765d67c229ffb915e7ee8120c52422cd3dabcdcc/mem0ai-2.0.12-py3-none-any.whl", hash = "sha256:6b7e1afa466f6e14dd34b5e9222c159a69fad38f8d787e73adbf91dbb29e73e2", size = 333546, upload-time = "2026-07-13T16:49:51.366Z" },
 ]
 
 [[package]]
@@ -2160,7 +2161,7 @@ requires-dist = [
     { name = "langchain-mcp-adapters", specifier = ">=0.2.0" },
     { name = "langchain-openai", specifier = ">=1.2.0" },
     { name = "markdownify", specifier = ">=1.2.0" },
-    { name = "mem0ai", specifier = ">=1.0.0,<2.0.0" },
+    { name = "mem0ai", specifier = ">=2.0.0" },
     { name = "microsandbox", specifier = ">=0.6.0" },
     { name = "pyyaml", specifier = ">=6.0.0" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
