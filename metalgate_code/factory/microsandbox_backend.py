@@ -39,6 +39,7 @@ from deepagents.backends.protocol import (
 )
 from microsandbox import Image, ImageNotFoundError, Sandbox, Volume
 
+from metalgate_code.factory.go_env_manager import is_go_image as _is_go_image
 from metalgate_code.factory.venv_manager import is_python_image as _is_python_image
 
 logger = logging.getLogger("metalgate_code")
@@ -165,6 +166,10 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         # When non-None, commands are run with this venv activated.
         self._venv_bin: str | None = None
         self._venv_env: dict[str, str] | None = None
+
+        # Guest-compatible Go build env (set after _ensure_go_env).
+        # When non-None, commands are run with Go env vars set.
+        self._go_env: dict[str, str] | None = None
 
         if eager:
             _run_async(self._ensure_sandbox())
@@ -346,6 +351,16 @@ class MicrosandboxBackend(SandboxBackendProtocol):
                 )
                 self._venv_bin, self._venv_env = await venv.ensure()
 
+            # For Go images, install dev tools (gopls, goimports,
+            # staticcheck) into the image's default /go/bin.  Nothing
+            # is persisted across launches — tools are reinstalled each boot.
+            # Setup is a no-op when the project has no go.mod.
+            if _is_go_image(self._image):
+                from metalgate_code.factory.go_env_manager import GoEnvManager
+
+                go_env = GoEnvManager(sb, run_in_vm=self._run_in_vm)
+                self._go_env = await go_env.ensure()
+
             return sb
 
     # low-level VM helpers (thin wrappers over sb.shell)
@@ -372,12 +387,13 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         """Run a command in the VM and return an ExecuteResponse.
 
         ``env`` controls the environment passed to ``sb.shell``:
-        - ``"default"`` (default): use ``self._venv_env`` if set, else None.
+        - ``"default"`` (default): use ``self._venv_env`` if set, else
+          ``self._go_env`` if set, else None.
         - ``None``: pass None explicitly (inherit VM's default env).
         - a dict: use that dict directly.
         """
         if env is None:
-            env = self._venv_env
+            env = self._venv_env or self._go_env
         try:
             result = await sb.shell(
                 command,
@@ -501,6 +517,16 @@ class MicrosandboxBackend(SandboxBackendProtocol):
     def venv_env(self) -> dict[str, str] | None:
         """Env dict that activates :attr:`venv_bin`, or ``None`` if no venv."""
         return self._venv_env
+
+    @property
+    def go_env(self) -> dict[str, str] | None:
+        """Env dict that activates the Go build env, or ``None`` if not set.
+
+        Established by :class:`~metalgate_code.factory.go_env_manager.GoEnvManager`
+        during sandbox boot when the image is Go-capable and the project
+        has a ``go.mod``.  When set, commands run with the Go env activated.
+        """
+        return self._go_env
 
     # Command execution
 

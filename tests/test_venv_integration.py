@@ -22,7 +22,7 @@ SAMPLES = Path(__file__).parent / "sample"
 SAMPLE_PYTHON = SAMPLES / "python"  # uv.lock (default)
 SAMPLE_PYPYPROJECT = SAMPLES / "python-pyproject"
 SAMPLE_REQUIREMENTS = SAMPLES / "python-requirements"
-SAMPLE_NO_MANIFEST = SAMPLES / "python-no-manifest"
+SAMPLE_NO_MANIFEST = SAMPLES / "project-no-manifest"
 
 
 def _copy_sample(src: Path, dest: Path) -> None:
