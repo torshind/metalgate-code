@@ -11,6 +11,7 @@ from langchain_core.tools import tool
 
 from metalgate_code.context.backend_context import get_backend
 from metalgate_code.skills.registry import registry
+from metalgate_code.skills.textual_skills import textual_registry
 
 logger = logging.getLogger("metalgate_code")
 
@@ -220,3 +221,29 @@ def delete_tool_skill(name: str) -> str:
     skills_path.write_text("".join(lines[:start] + lines[target.end_lineno :]))
     registry.reload()
     return f"Tool skill '{name}' deleted."
+
+
+@tool
+def list_textual_skills() -> list[str]:
+    """Return the names of all available textual skill documents."""
+    return textual_registry.list()
+
+
+@tool
+def load_textual_skill(name: str) -> str:
+    """Load the full content of a textual skill document by name.
+    Returns the skill content or an error message if not found."""
+    content = textual_registry.get(name)
+    if content is None:
+        available = ", ".join(textual_registry.list()) or "none"
+        return f"Textual skill '{name}' not found. Available: {available}"
+    return content
+
+
+@tool
+def reload_textual_skills() -> str:
+    """Reload all textual skill documents from .metalgate/skills/.
+    Use this after the user has manually edited a skill document to pick up changes without restarting."""
+    textual_registry.reload()
+    skills = textual_registry.list()
+    return f"Reloaded {len(skills)} textual skills: {', '.join(skills) or 'none'}"

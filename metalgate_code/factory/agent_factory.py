@@ -32,10 +32,14 @@ from metalgate_code.models import create_chat_model
 from metalgate_code.skills import (
     create_tool_skill,
     delete_tool_skill,
+    list_textual_skills,
+    load_textual_skill,
     read_tool_skill,
     registry,
+    reload_textual_skills,
     reload_tool_skills,
 )
+from metalgate_code.skills.textual_skills import textual_registry
 from metalgate_code.skills.registry_mcp import registry_mcp
 
 logger = logging.getLogger("metalgate_code")
@@ -60,6 +64,9 @@ META_SKILLS = [
     delete_tool_skill,
     read_tool_skill,
     reload_tool_skills,
+    list_textual_skills,
+    load_textual_skill,
+    reload_textual_skills,
 ]
 
 
@@ -74,6 +81,9 @@ def _build_agent(
     # Load project tool skills
     logger.info("Loading tool skills from %s", cwd)
     registry.load(cwd, backend=shell_backend)
+    # Load project textual skills
+    logger.info("Loading textual skills from %s", cwd)
+    textual_registry.load(cwd, backend=shell_backend)
     # Load project MCP tools
     logger.info("Loading MCP tools from %s", cwd)
     registry_mcp.load(cwd, backend=shell_backend)
