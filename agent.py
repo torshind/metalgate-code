@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 
 from acp import run_agent as run_acp_agent
+from deepagents.backends import LocalShellBackend
+from deepagents.backends.protocol import SandboxBackendProtocol
 from dotenv import load_dotenv
 
 from metalgate_code.config import get_available_modes
@@ -39,14 +41,26 @@ async def _serve_agent() -> None:
     # Fetch models from the configured provider API
     models = fetch_models()
 
-    def make_shell_backend(cwd: str) -> MicrosandboxBackend:
+    def make_shell_backend(cwd: str) -> SandboxBackendProtocol:
         """Factory that creates the shell backend when cwd is known.
+
+        Default MicrosandboxBackend.
 
         Image selection (lowest → highest precedence):
           1. Auto-detect from project files (go.mod → "go", else "uv:python").
           2. ``SANDBOX_IMAGE`` env var (user override).
+
+        Override to unsecure LocalShellBackend via DISABLE_SANDBOX env var
         """
         shell_env = os.environ.copy()
+
+        if os.environ.get("DISABLE_SANDBOX", "").lower() in ("true", "1", "yes", "on"):
+            return LocalShellBackend(
+                root_dir=cwd,
+                virtual_mode=False,
+                env=shell_env,
+                inherit_env=True,
+            )
 
         if os.environ.get("SANDBOX_IMAGE"):
             image = os.environ["SANDBOX_IMAGE"]
