@@ -824,6 +824,8 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         pattern: str,
         path: str | None = None,
         glob: str | None = None,
+        *,
+        max_count: int | None = None,
     ) -> GrepResult:
         """Search for a literal string in files using ``grep -F``."""
         search_path = self._to_guest_path(path) if path else "."
@@ -868,6 +870,8 @@ class MicrosandboxBackend(SandboxBackendProtocol):
         pattern: str,
         path: str | None = None,
         glob: str | None = None,
+        *,
+        max_count: int | None = None,
     ) -> GrepResult:
         """Search for a literal string (sync wrapper)."""
         return _run_async(self.agrep(pattern, path=path, glob=glob))

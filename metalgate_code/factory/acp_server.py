@@ -4,10 +4,12 @@ ACP Server factory for MetalGate Code agent.
 
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from acp.schema import (
+    AcpMcpServer,
     AgentCapabilities,
     CloseSessionResponse,
     HttpMcpServer,
@@ -27,7 +29,7 @@ from acp.schema import (
     TextContentBlock,
 )
 from deepagents.backends.protocol import SandboxBackendProtocol
-from deepagents_acp.server import AgentServerACP, AgentSessionContext
+from deepagents_acp.server import AgentServerACP, AgentSessionContext, McpServer
 from langchain_core.runnables.config import RunnableConfig
 from langgraph.checkpoint.base import (
     CheckpointMetadata,
@@ -125,7 +127,7 @@ class MetalGateACP(AgentServerACP):
         resource_text += "]"
         return resource_text
 
-    async def prompt(self, prompt, session_id, message_id=None, **kwargs):  # noqa: PLR0913
+    async def prompt(self, prompt, session_id, message_id=None, **kwargs):
         """Process a user prompt and persist messages afterward."""
         # Pre-resolve ResourceContentBlock URIs before base class processes them
         processed = []
@@ -218,8 +220,9 @@ class MetalGateACP(AgentServerACP):
     async def new_session(
         self,
         cwd: str,
-        mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
-        **kwargs: Any,  # noqa: ARG002  # ACP protocol interface parameter
+        additional_directories: list[str] | list[McpServer] | None = None,
+        mcp_servers: list[McpServer] | None = None,
+        **kwargs: Any,  # ACP protocol interface parameter
     ) -> NewSessionResponse:
         logger.info(f"Creating new session for cwd {cwd}")
         await self._store.init_db(cwd)
@@ -227,9 +230,8 @@ class MetalGateACP(AgentServerACP):
 
     async def list_sessions(
         self,
-        additional_directories: list[str] | None = None,
-        cursor: str | None = None,
         cwd: str | None = None,
+        cursor: str | None = None,
         **kwargs: Any,
     ) -> ListSessionsResponse:
         """List available sessions from the SQLite database."""
@@ -290,8 +292,8 @@ class MetalGateACP(AgentServerACP):
         self,
         cwd: str,
         session_id: str,
+        mcp_servers: list[HttpMcpServer | SseMcpServer | AcpMcpServer | McpServerStdio] | None = None,
         additional_directories: list[str] | None = None,
-        mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
         **kwargs: Any,
     ) -> LoadSessionResponse:
         """Load an existing session with the given ID."""
@@ -304,10 +306,10 @@ class MetalGateACP(AgentServerACP):
 
     async def resume_session(
         self,
-        cwd: str,
         session_id: str,
+        cwd: str,
         additional_directories: list[str] | None = None,
-        mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
+        mcp_servers: list[HttpMcpServer | SseMcpServer | AcpMcpServer | McpServerStdio] | None = None,
         **kwargs: Any,
     ) -> ResumeSessionResponse:
         """Resume an existing session with the given ID."""

@@ -4,8 +4,9 @@ Agent factory for creating Deep Agent instances based on session context.
 
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
+from typing import Any
 
 from deepagents import create_deep_agent
 from deepagents.backends import (
@@ -17,6 +18,8 @@ from deepagents.backends.protocol import SandboxBackendProtocol
 from deepagents.graph import DeepAgentState
 from deepagents_acp.server import AgentSessionContext
 from deepagents_code.local_context import LocalContextMiddleware
+from langchain.agents.middleware import TodoListMiddleware
+from langchain.agents.middleware.types import AgentMiddleware
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph.state import CompiledStateGraph
 
@@ -39,8 +42,8 @@ from metalgate_code.skills import (
     reload_textual_skills,
     reload_tool_skills,
 )
-from metalgate_code.skills.textual_skills import textual_registry
 from metalgate_code.skills.registry_mcp import registry_mcp
+from metalgate_code.skills.textual_skills import textual_registry
 
 logger = logging.getLogger("metalgate_code")
 
@@ -104,7 +107,7 @@ def _build_agent(
         file_exists = os.path.isfile(agents_md_path)
 
     if file_exists:
-        logging.info(f"Loading AGENTS.md from {agents_md_path}")
+        logger.info(f"Loading AGENTS.md from {agents_md_path}")
         try:
             if shell_backend:
                 result = shell_backend.read(str(agents_md_path))
@@ -116,8 +119,8 @@ def _build_agent(
             else:
                 with open(agents_md_path, "r", encoding="utf-8") as f:
                     agents_md_content = f.read()
-            logging.info(f"Loaded {len(agents_md_content)} bytes from AGENTS.md")
-        except (OSError, IOError):
+            logger.info(f"Loaded {len(agents_md_content)} bytes from AGENTS.md")
+        except OSError:
             pass  # Silently ignore file read errors
 
     ephemeral_backend = StateBackend()
@@ -178,17 +181,20 @@ def _build_agent(
 
     context_tools = get_code_tools(cwd=cwd, backend=shell_backend)
 
+    middleware: list[AgentMiddleware[Any, Any, Any]] = [
+        TodoListMiddleware(system_prompt=""),
+        LocalContextMiddleware(backend=backend),
+        RecollectorMiddleware(memory=memory),
+        ToolSkillsMiddleware(),
+        DynamicToolsMiddleware(backend=shell_backend),
+        CollectorMiddleware(memory=memory),
+    ]
+
     return create_deep_agent(
         model=model,
         backend=backend,
         interrupt_on=interrupt_config,
-        middleware=[
-            LocalContextMiddleware(backend=backend),
-            RecollectorMiddleware(memory=memory),
-            ToolSkillsMiddleware(),
-            DynamicToolsMiddleware(backend=shell_backend),
-            CollectorMiddleware(memory=memory),
-        ],
+        middleware=middleware,
         tools=META_SKILLS + context_tools,
         system_prompt=system_prompt,
         state_schema=DeepAgentState,
