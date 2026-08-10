@@ -50,7 +50,8 @@ class MetalGateACP(AgentServerACP):
     def __init__(
         self,
         agent_factory: Callable[
-            [AgentSessionContext, SandboxBackendProtocol | None], CompiledStateGraph
+            [AgentSessionContext, SandboxBackendProtocol | None, MemorySaver | None],
+            CompiledStateGraph,
         ],
         backend_factory: Callable[[str], SandboxBackendProtocol],
         modes: Any,
@@ -72,11 +73,19 @@ class MetalGateACP(AgentServerACP):
         self._store = SessionStore()
         self._replayer = ChatHistoryReplayer()
         self._pending_session_messages: dict[str, list[Any]] = {}
+        # Shared checkpointer reused across agent rebuilds. The base class
+        # rebuilds the agent on mode/model switches; a fresh MemorySaver each
+        # time would lose the conversation history. One instance multiplexes
+        # sessions internally by thread_id.
+        self._checkpointer = MemorySaver()
 
     def _create_agent(self, context: AgentSessionContext) -> CompiledStateGraph:
         """Called by base class to create the agent for a session."""
         self._shell_backend = self._backend_factory(context.cwd)
-        return self._user_agent_factory(context, self._shell_backend)
+        # Pass the shared checkpointer so rebuilds preserve history.
+        return self._user_agent_factory(
+            context, self._shell_backend, self._checkpointer
+        )
 
     async def initialize(
         self,
@@ -292,7 +301,8 @@ class MetalGateACP(AgentServerACP):
         self,
         cwd: str,
         session_id: str,
-        mcp_servers: list[HttpMcpServer | SseMcpServer | AcpMcpServer | McpServerStdio] | None = None,
+        mcp_servers: list[HttpMcpServer | SseMcpServer | AcpMcpServer | McpServerStdio]
+        | None = None,
         additional_directories: list[str] | None = None,
         **kwargs: Any,
     ) -> LoadSessionResponse:
@@ -309,7 +319,8 @@ class MetalGateACP(AgentServerACP):
         session_id: str,
         cwd: str,
         additional_directories: list[str] | None = None,
-        mcp_servers: list[HttpMcpServer | SseMcpServer | AcpMcpServer | McpServerStdio] | None = None,
+        mcp_servers: list[HttpMcpServer | SseMcpServer | AcpMcpServer | McpServerStdio]
+        | None = None,
         **kwargs: Any,
     ) -> ResumeSessionResponse:
         """Resume an existing session with the given ID."""

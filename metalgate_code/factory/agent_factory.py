@@ -76,6 +76,7 @@ META_SKILLS = [
 def _build_agent(
     context: AgentSessionContext,
     shell_backend: SandboxBackendProtocol | None = None,
+    checkpointer: MemorySaver | None = None,
 ) -> CompiledStateGraph:
     """Agent factory based on the given root directory."""
     logger.info("Model: %s", context.model)
@@ -198,19 +199,23 @@ def _build_agent(
         tools=META_SKILLS + context_tools,
         system_prompt=system_prompt,
         state_schema=DeepAgentState,
-        checkpointer=MemorySaver(),
+        checkpointer=checkpointer if checkpointer is not None else MemorySaver(),
     )
 
 
 def create_agent() -> Callable[
-    [AgentSessionContext, SandboxBackendProtocol | None], CompiledStateGraph
+    [AgentSessionContext, SandboxBackendProtocol | None, MemorySaver | None],
+    CompiledStateGraph,
 ]:
     """Create a factory function that accepts (context, backend) and returns a compiled agent."""
 
     def factory(
         context: AgentSessionContext,
         shell_backend: SandboxBackendProtocol | None = None,
+        checkpointer: MemorySaver | None = None,
     ) -> CompiledStateGraph:
-        return _build_agent(context, shell_backend=shell_backend)
+        return _build_agent(
+            context, shell_backend=shell_backend, checkpointer=checkpointer
+        )
 
     return factory

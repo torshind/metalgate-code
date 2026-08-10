@@ -367,3 +367,82 @@ def list_all_files(path: str) -> Tuple[int, str]:
                 f"Agent did not reproduce the return code from tool output. "
                 f"Second response: {agent_response[:500]}..."
             )
+
+
+@pytest.mark.asyncio
+async def test_session_memory_survives_mode_switch(run_sh: Path) -> None:
+    """
+    Verify that switching the session mode mid-conversation does not wipe
+    the in-memory conversation history.
+    """
+    name = "Alice"
+
+    client = RecordingClient(prefix="acp_session_test_")
+    with client:
+        logger.info("Starting agent: %s", run_sh)
+        async with spawn_agent_process(
+            client,
+            "bash",
+            str(run_sh),
+        ) as (conn, _proc):
+            await conn.initialize(protocol_version=1)
+            logger.info("Initialized")
+
+            session = await conn.new_session(
+                cwd=str(client.temp_dir),
+                mcp_servers=[],
+            )
+            session_id = session.session_id
+            logger.info("New session: %s", session_id)
+
+            await conn.set_config_option(
+                config_id="model",
+                session_id=session_id,
+                value=MODEL,
+            )
+            await conn.set_config_option(
+                config_id="mode",
+                session_id=session_id,
+                value="ask_before_edits",
+            )
+
+            # First prompt: tell the agent a name to remember.
+            await asyncio.wait_for(
+                conn.prompt(
+                    session_id=session_id,
+                    prompt=[text_block(f"My name is {name}. Please remember this.")],
+                ),
+                timeout=AGENT_TIMEOUT,
+            )
+            logger.info("First interaction output:\n%s", client.all_text)
+            assert client.updates, "First interaction produced no updates"
+
+            # Switch the mode mid-session; this rebuilds the agent internally.
+            await conn.set_config_option(
+                config_id="mode",
+                session_id=session_id,
+                value="accept_edits",
+            )
+            logger.info("Switched mode to accept_edits")
+
+            # Second prompt: ask the agent to recall the name.
+            await asyncio.wait_for(
+                conn.prompt(
+                    session_id=session_id,
+                    prompt=[
+                        text_block(
+                            "What is my name that I just told you? "
+                            "Answer with just the name."
+                        )
+                    ],
+                ),
+                timeout=AGENT_TIMEOUT,
+            )
+            logger.info("Second interaction output:\n%s", client.all_text)
+
+            await conn.close_session(session_id)
+
+            assert name in client.agent_text, (
+                f"AI did not recall name '{name}' after mode switch. "
+                f"Agent text: {client.agent_text[:500]}"
+            )
