@@ -5,10 +5,10 @@ description = "ACP (Agent Communication Protocol) code agent featuring in-sessio
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "deepagents==0.7.5",
-    "deepagents-acp==0.0.9",
-    "deepagents-code==0.1.54",
-    "agent-client-protocol==0.11.1",
+    "deepagents==0.7.10",
+    "deepagents-acp==0.0.11",
+    "deepagents-code==0.1.64",
+    "agent-client-protocol==0.12.1",
     "microsandbox>=0.6.0",
     "isort>=8.0.0",
     "langchain-community>=0.4.0",

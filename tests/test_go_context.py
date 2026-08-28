@@ -267,7 +267,7 @@ class TestGotoDefinition:
             f"expected strings.go, got {result['file']} "
             "(resolving the package import instead of the function)"
         )
-        assert result["line"] == 687, f"expected line 687, got {result['line']}"
+        assert result["line"] == 668, f"expected line 668, got {result['line']}"
         assert "ToUpper" in result["signature"], (
             f"expected signature containing 'ToUpper', got {result['signature']!r}"
         )
@@ -582,7 +582,7 @@ class TestGotoDefinitionSameQualifierTwice:
             f"expected strings.go, got {result['file']} "
             "(resolving the package import instead of the function)"
         )
-        assert result["line"] == 687, f"expected line 687, got {result['line']}"
+        assert result["line"] == 668, f"expected line 668, got {result['line']}"
         assert "ToUpper" in result["signature"], (
             f"expected signature containing 'ToUpper', got {result['signature']!r}"
         )
@@ -596,8 +596,8 @@ class TestGotoDefinitionSameQualifierTwice:
             f"expected strings.go, got {result['file']} "
             "(resolving the package import instead of the function)"
         )
-        assert result["line"] == 727, (
-            f"expected line 727 (ToLower), got {result['line']} "
+        assert result["line"] == 708, (
+            f"expected line 708 (ToLower), got {result['line']} "
             "(resolving the first occurrence ToUpper instead of the requested ToLower)"
         )
         assert "ToLower" in result["signature"], (

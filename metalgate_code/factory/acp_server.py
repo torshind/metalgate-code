@@ -301,9 +301,8 @@ class MetalGateACP(AgentServerACP):
         self,
         cwd: str,
         session_id: str,
-        mcp_servers: list[HttpMcpServer | SseMcpServer | AcpMcpServer | McpServerStdio]
-        | None = None,
         additional_directories: list[str] | None = None,
+        mcp_servers: list[McpServer] | None = None,
         **kwargs: Any,
     ) -> LoadSessionResponse:
         """Load an existing session with the given ID."""
