@@ -1,3 +1,7 @@
+# DEPRECATION NOTICE
+
+**Deprecated in favor of [https://github.com/metalgate-xyz/metalgate-code](https://github.com/metalgate-xyz/metalgate-code)**
+
 # metalgate-code
 
 An ACP (Agent Communication Protocol) code agent featuring **in-session dynamic tool skills** — create, register, and use new tools during a conversation without restarting the agent.
